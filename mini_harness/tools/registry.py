@@ -61,8 +61,7 @@ class ToolRegistry:
 
         上下游:
             main.py 在启动时注册 AddTool；AgentRunner 通过 get_definitions
-            和 execute 使用注册表。重复 name 会覆盖旧工具，与 Nanobot 的
-            简单注册行为一致。
+            和 execute 使用注册表。重复 name 会覆盖旧工具
         """
         if not isinstance(tool.name, str) or not tool.name:
             raise ValueError("工具必须有非空 name")

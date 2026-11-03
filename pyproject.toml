@@ -1,10 +1,20 @@
 [project]
 name = "mini-harness"
-version = "0.1.0"
-description = "A minimal, runnable, testable agent harness for learning Nanobot Harness."
+version = "0.2.0"
+description = "A minimal, runnable, testable agent harness with real LLM providers and an interactive CLI."
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "httpx[socks]>=0.28.0",
+]
+
+[project.scripts]
+mini-bot = "mini_harness.cli.main:cli"
+mini-harness = "mini_harness.cli.main:cli"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
 
 [dependency-groups]
 dev = [
@@ -13,7 +23,10 @@ dev = [
 ]
 
 [tool.uv]
-package = false
+package = true
+
+[tool.setuptools.packages.find]
+include = ["mini_harness*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

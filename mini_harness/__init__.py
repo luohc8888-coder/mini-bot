@@ -1,16 +1,24 @@
-"""Mini Harness V0。
-
-一个最小可运行的 Agent Harness，用于从零理解 Agent Loop、Provider、
-ToolRegistry 以及消息总线之间的协作关系。V0 只实现工具调用闭环，
-不包含 Session、Context Engineering、Memory、Hooks、Checkpoint 或 MCP。
-"""
+"""Mini Harness 包的公开接口。"""
 
 from .agent import AgentLoop, AgentRunResult, AgentRunSpec, AgentRunner
 from .bus import InboundMessage, MessageBus, OutboundMessage
-from .providers import LLMProvider, LLMResponse, MockProvider, ToolCallRequest
+from .providers import (
+    AnthropicProvider,
+    LLMProvider,
+    LLMResponse,
+    MockProvider,
+    OpenAICompatibleProvider,
+    ProviderConfig,
+    ProviderError,
+    ProviderFactory,
+    ProviderPreset,
+    ToolCallRequest,
+    create_provider,
+    get_preset,
+)
 from .tools import AddTool, Tool, ToolRegistry, ToolResult
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "AddTool",
@@ -18,14 +26,22 @@ __all__ = [
     "AgentRunResult",
     "AgentRunSpec",
     "AgentRunner",
+    "AnthropicProvider",
     "InboundMessage",
     "LLMProvider",
     "LLMResponse",
     "MessageBus",
     "MockProvider",
+    "OpenAICompatibleProvider",
     "OutboundMessage",
+    "ProviderConfig",
+    "ProviderError",
+    "ProviderFactory",
+    "ProviderPreset",
     "Tool",
     "ToolCallRequest",
     "ToolRegistry",
     "ToolResult",
+    "create_provider",
+    "get_preset",
 ]

@@ -200,7 +200,11 @@ class AgentRunner:
             final_content = (
                 response.content if response.content is not None else ""
             )
-            messages.append({"role": "assistant", "content": final_content})
+            # 空 assistant 消息不应进入后续上下文；否则真实模型可能收到
+            # 空的 assistant content，导致下一轮行为不稳定。CLI 会单独
+            # 显示“模型返回了空内容”的提示。
+            if final_content.strip():
+                messages.append({"role": "assistant", "content": final_content})
             stop_reason = "completed"
             # break：终止迭代循环，避免继续发起无意义的模型请求。
             break

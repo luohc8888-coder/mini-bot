@@ -114,7 +114,7 @@ async def test_stop_before_run_prevents_loop_from_starting() -> None:
 
 
 def test_cli_main_prints_expected_answer(capsys: pytest.CaptureFixture[str]) -> None:
-    """验证实际 CLI 入口打印最终答案，且退出后没有挂起任务。"""
-    asyncio.run(cli_main())
+    """验证实际 CLI 演示入口打印最终答案，且退出后没有挂起任务。"""
+    asyncio.run(cli_main(["--demo"]))
     captured = capsys.readouterr()
     assert captured.out.strip() == "结果是 5"

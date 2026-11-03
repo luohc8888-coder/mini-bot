@@ -15,6 +15,14 @@ Message = dict[str, Any]
 ToolDefinition = dict[str, Any]
 
 
+class ProviderError(RuntimeError):
+    """Provider 请求失败时抛出的统一异常。
+
+    CLI 会捕获该异常并打印可读错误，而不是让整个交互进程退出。
+    具体错误信息应包含 Provider、HTTP 状态码（如有）和响应摘要。
+    """
+
+
 @dataclass(slots=True)
 class ToolCallRequest:
     """Provider 返回的一次工具调用请求。
