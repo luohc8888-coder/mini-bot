@@ -121,7 +121,7 @@ uv run python main.py --list-providers
 
 ## 交互式 CLI 使用
 
-启动后会先显示 Provider 分组菜单：
+首次启动、或者没有默认配置时会显示 Provider 分组菜单：
 
 ```text
 [快速体验]
@@ -132,7 +132,7 @@ uv run python main.py --list-providers
   ...
 ```
 
-选择 Provider 后，再选择模型（也可以输入自定义模型 ID）、确认 Base URL，并输入 API Key。API Key 优先从环境变量读取；如果没有设置，CLI 会提示输入且不回显。创建配置时默认会保存为下次启动使用的默认配置；本次输入的 API Key 也会写入权限为 0600 的本地配置文件，便于直接复用。
+选择 Provider 后，再选择模型（也可以输入自定义模型 ID）、确认 Base URL，并输入 API Key。API Key 优先从环境变量读取；如果没有设置，CLI 会提示输入且不回显。创建配置时默认会保存为下次启动使用的默认配置；本次输入的 API Key 也会写入权限为 0600 的本地配置文件，便于直接复用。之后启动会直接使用默认配置，不再显示选择菜单；运行中可用 `/model` 切换配置。
 
 ### 环境变量
 
@@ -186,7 +186,7 @@ mini-bot --interactive
 | `/tools` | 查看已注册工具 |
 | `/exit` 或 `/quit` | 退出 CLI |
 
-交互式终端中用户、助手、工具和错误会使用不同颜色；设置 `NO_COLOR=1` 可关闭颜色。
+交互式终端中用户、助手、工具和错误会使用不同颜色；设置 `MINI_HARNESS_NO_COLOR=1` 可关闭颜色。
 
 ### 保存配置
 

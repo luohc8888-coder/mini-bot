@@ -44,7 +44,8 @@ class _AbortSelection(Exception):
 class Console:
     """终端输入输出封装；测试可替换为脚本化实现。
 
-    颜色只在交互式终端启用；重定向输出或设置 ``NO_COLOR`` 时自动关闭。
+    颜色只在交互式终端启用；重定向输出或设置
+    ``MINI_HARNESS_NO_COLOR=1`` 时自动关闭。
     """
 
     _USER_COLOR = "1;36"
@@ -56,7 +57,10 @@ class Console:
         self.color = (
             color
             if color is not None
-            else bool(sys.stdout.isatty() and not os.getenv("NO_COLOR"))
+            else bool(
+                sys.stdout.isatty()
+                and not os.getenv("MINI_HARNESS_NO_COLOR")
+            )
         )
 
     def _style(self, text: str, code: str) -> str:

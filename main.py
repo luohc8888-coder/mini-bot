@@ -1,10 +1,12 @@
 """Mini Harness CLI 兼容入口。
 
-推荐安装后直接使用 ``mini-bot`` 命令；仍保留此文件以兼容：
+推荐安装后直接使用 ``mini-bot`` 命令：
 
-    uv run python main.py
-    uv run python main.py --demo
-    uv run python main.py --list-providers
+    mini-bot --interactive
+    mini-bot --demo
+    mini-bot --list-providers
+
+也保留原来的 ``uv run python main.py`` 用法。
 """
 
 from __future__ import annotations
