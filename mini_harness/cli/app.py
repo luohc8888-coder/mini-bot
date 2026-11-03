@@ -1,7 +1,8 @@
 """Mini Harness 交互式 CLI。
 
 优先复用默认配置启动；没有默认配置时选择 Provider / 模型 / API Key。支持
-保存默认配置、运行中通过 ``/model`` 切换 Provider/模型，以及清空上下文。
+保存默认配置、运行中通过 ``/model`` 切换 Provider/模型，以及 V1 的
+Workspace 固定、Session 历史恢复、``/history`` 和 ``/clear``。
 """
 
 from __future__ import annotations
@@ -10,9 +11,12 @@ import asyncio
 import getpass
 import os
 import sys
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
+from pathlib import Path
 
-from mini_harness.agent import AgentRunner, AgentRunSpec
+from mini_harness.agent import AgentLoop, AgentRunner, AgentRunSpec
+from mini_harness.bus import InboundMessage, MessageBus, OutboundMessage
 from mini_harness.providers import (
     LLMProvider,
     ProviderConfig,
@@ -24,7 +28,19 @@ from mini_harness.providers import (
     grouped_presets,
 )
 from mini_harness.providers.base import Message
-from mini_harness.tools import AddTool, ToolRegistry
+from mini_harness.session import (
+    SessionError,
+    SessionManager,
+    WorkspaceResolver,
+)
+from mini_harness.tools import (
+    AddTool,
+    GrepTool,
+    ListDirTool,
+    ReadFileTool,
+    ToolRegistry,
+    WriteFileTool,
+)
 
 from .profiles import ProfileStore, ProviderProfile
 
@@ -159,46 +175,104 @@ class InteractiveCLI:
         *,
         console: Console | None = None,
         profile_store: ProfileStore | None = None,
-        max_iterations: int = 8,
+        max_iterations: int = 32,
+        workspace: str | Path | None = None,
+        data_root: Path | None = None,
+        session_manager: SessionManager | None = None,
     ) -> None:
-        """初始化 CLI 依赖。"""
+        """初始化 CLI 依赖。
+
+        Args:
+            workspace: V1 Workspace；为 None 且未提供 SessionManager 时
+                保持 V0 无 Session 的兼容行为。
+            data_root: Session 数据根目录，便于测试或自定义 Harness 状态位置。
+            session_manager: 可注入的已有 SessionManager，优先于 workspace。
+        """
         self.console = console or Console()
         self.store = profile_store or ProfileStore()
         self.max_iterations = max_iterations
         self.tools = ToolRegistry()
         self.tools.register(AddTool())
 
+        if session_manager is not None:
+            self.session_manager: SessionManager | None = session_manager
+            self.workspace: Path | None = session_manager.workspace
+        elif workspace is not None or data_root is not None:
+            resolved = WorkspaceResolver().resolve(workspace)
+            self.session_manager = SessionManager(resolved, data_root=data_root)
+            self.workspace = resolved.path
+        else:
+            # 兼容旧测试和作为库使用的 V0 调用方式；安装后的 CLI
+            # ``run_interactive_cli`` 总会显式传入 workspace。
+            self.session_manager = None
+            self.workspace = None
+
+        # 文件工具必须绑定固定的 Workspace，不能读取进程 cwd。
+        if self.workspace is not None:
+            file_workspace = WorkspaceResolver().resolve(self.workspace)
+            self.tools.register(GrepTool(file_workspace))
+            self.tools.register(ListDirTool(file_workspace))
+            self.tools.register(ReadFileTool(file_workspace))
+            self.tools.register(WriteFileTool(file_workspace))
+
     async def run(self) -> None:
         """运行配置选择与聊天主循环。"""
-        self._show_banner()
+        lock_context = (
+            self.session_manager.lock()
+            if self.session_manager is not None
+            else nullcontext()
+        )
         try:
-            while True:
+            with lock_context:
                 try:
-                    selection = await self._select_config()
-                except _AbortSelection:
-                    self.console.write("已退出。")
+                    self._show_banner()
+                except SessionError as exc:
+                    self.console.write_error(f"Session 加载失败：{exc}")
                     return
-
-                if selection is None:
-                    self.console.write("已退出。")
-                    return
-
                 try:
-                    provider = create_provider(selection.config)
-                except ProviderConfigurationError as exc:
-                    self.console.write(f"配置错误：{exc}")
-                    continue
+                    while True:
+                        try:
+                            selection = await self._select_config()
+                        except _AbortSelection:
+                            self.console.write("已退出。")
+                            return
 
-                should_switch = await self._chat_loop(provider, selection)
-                if not should_switch:
-                    self.console.write("已退出。")
-                    return
-        except (KeyboardInterrupt, EOFError):
-            self.console.write("\n已退出。")
+                        if selection is None:
+                            self.console.write("已退出。")
+                            return
+
+                        try:
+                            provider = create_provider(selection.config)
+                        except ProviderConfigurationError as exc:
+                            self.console.write(f"配置错误：{exc}")
+                            continue
+
+                        should_switch = await self._chat_loop(
+                            provider,
+                            selection,
+                        )
+                        if not should_switch:
+                            self.console.write("已退出。")
+                            return
+                except (KeyboardInterrupt, EOFError):
+                    self.console.write("\n已退出。")
+        except SessionError as exc:
+            self.console.write_error(str(exc))
 
     def _show_banner(self) -> None:
-        """显示欢迎信息。"""
+        """显示 V1 启动摘要或 V0 兼容欢迎信息。"""
         self.console.write("")
+        if self.session_manager is not None:
+            session = self.session_manager.load()
+            self.console.write("Mini Harness V1")
+            self.console.write(f"Workspace: {self.workspace}")
+            self.console.write(f"Session: {self.session_manager.session_key}")
+            self.console.write(f"History: {len(session.messages)} messages")
+            self.console.write(f"Loaded messages: {len(session.messages)}")
+            self.console.write(f"配置文件：{self.store.path}")
+            self.console.write("输入 /help 查看命令；输入 /exit 退出。")
+            return
+
         self.console.write("=" * 56)
         self.console.write("  Mini Harness Interactive CLI")
         self.console.write("=" * 56)
@@ -470,12 +544,184 @@ class InteractiveCLI:
             return default
         return answer in {"y", "yes", "是"}
 
+    async def _chat_loop_with_session(
+        self,
+        provider: LLMProvider,
+        selection: Selection,
+    ) -> bool:
+        """V1：每个用户回合通过 MessageBus + AgentLoop 执行并持久化。"""
+        self.console.write("")
+        self.console.write(
+            f"已连接：{selection.preset.display_name} / {selection.config.model}"
+        )
+        self.console.write(
+            "命令：/model 切换厂商或模型  /history 查看历史  "
+            "/clear 清空 Session  /tools 查看工具  /help 帮助  /exit 退出"
+        )
+
+        while True:
+            try:
+                user_text = await self.console.read(self.console.user_prompt())
+            except EOFError:
+                self.console.write("")
+                return False
+
+            if not user_text:
+                continue
+
+            command = user_text.strip().lower()
+            if command in {"/exit", "/quit", "exit", "quit"}:
+                return False
+            if command == "/help":
+                self.console.write(
+                    "/model 或 /config 切换 Provider/模型（Session 历史保留）；"
+                    "/history 查看当前 Session；/clear 清空当前 Session；"
+                    "/tools 查看已注册工具；/exit 退出。"
+                )
+                continue
+            if command == "/history":
+                self._print_history()
+                continue
+            if command == "/clear":
+                try:
+                    self.session_manager.clear()  # type: ignore[union-attr]
+                except SessionError as exc:
+                    self.console.write_error(f"清空 Session 失败：{exc}")
+                else:
+                    self.console.write("已清空当前 Session 历史。")
+                continue
+            if command in {"/config", "/model"}:
+                self.console.write(
+                    "选择新的 Provider / 模型；当前 Session 历史保留。"
+                )
+                try:
+                    new_selection = await self._select_config(force_menu=True)
+                except _AbortSelection:
+                    self.console.write("已取消切换。")
+                    continue
+                if new_selection is None:
+                    self.console.write("已取消切换。")
+                    continue
+                try:
+                    new_provider = create_provider(new_selection.config)
+                except ProviderConfigurationError as exc:
+                    self.console.write(f"配置错误：{exc}")
+                    continue
+                provider = new_provider
+                selection = new_selection
+                self.console.write(
+                    f"已切换：{selection.preset.display_name} / "
+                    f"{selection.config.model}"
+                )
+                continue
+            if command == "/tools":
+                self.console.write("已注册工具：" + ", ".join(self.tools.tool_names))
+                continue
+            if user_text.startswith("/"):
+                self.console.write("未知命令，输入 /help 查看可用命令。")
+                continue
+
+            try:
+                outbound = await self._run_session_turn(
+                    provider,
+                    selection,
+                    user_text,
+                )
+            except Exception as exc:  # noqa: BLE001 - CLI 兜底展示
+                self.console.write_error(
+                    f"请求失败：{type(exc).__name__}: {exc}"
+                )
+                continue
+
+            if outbound.metadata.get("error"):
+                self.console.write_error(outbound.content)
+                continue
+            answer = outbound.content
+            if not answer.strip():
+                answer = "（模型返回了空内容）"
+            tools_used = outbound.metadata.get("tools_used", [])
+            if tools_used:
+                self.console.write_tool(", ".join(tools_used))
+            self.console.write_assistant(answer)
+
+    async def _run_session_turn(
+        self,
+        provider: LLMProvider,
+        selection: Selection,
+        user_text: str,
+    ) -> OutboundMessage:
+        """通过一次独立的 AgentLoop 任务处理一个用户回合。
+
+        每次用户输入都构造 MessageBus + AgentLoop，把 Session 的加载、
+        Runner 调用和保存全部留在 AgentLoop 内，CLI 只负责投递输入和读取
+        出站结果。这样也避免 CLI 直接修改 Session 文件。
+        """
+        turn_provider = provider
+        if selection.preset.protocol == "mock":
+            # MockProvider 的响应序列是一次性的；每个用户回合使用新的
+            # MockProvider，模拟真实 Provider 可跨回合复用的行为。
+            turn_provider = create_provider(selection.config)
+
+        bus = MessageBus()
+        runner = AgentRunner(provider=turn_provider, tools=self.tools)
+        agent_loop = AgentLoop(
+            bus=bus,
+            runner=runner,
+            max_iterations=self.max_iterations,
+            poll_interval=0.01,
+            session_manager=self.session_manager,
+        )
+        loop_task = asyncio.create_task(agent_loop.run())
+        try:
+            await bus.publish_inbound(
+                InboundMessage(content=user_text, sender="cli")
+            )
+            try:
+                return await asyncio.wait_for(
+                    bus.consume_outbound(),
+                    timeout=120.0,
+                )
+            except TimeoutError:
+                return OutboundMessage(
+                    content="Agent 响应超时。",
+                    metadata={"error": "timeout", "tools_used": []},
+                )
+        finally:
+            agent_loop.stop()
+            await loop_task
+
+    def _print_history(self) -> None:
+        """打印当前 Session 历史；命令本身不会发送给 LLM。"""
+        try:
+            session = self.session_manager.load()  # type: ignore[union-attr]
+        except SessionError as exc:
+            self.console.write_error(f"Session 加载失败：{exc}")
+            return
+        if not session.messages:
+            self.console.write("当前 Session 历史为空。")
+            return
+        self.console.write(f"当前 Session 历史（{len(session.messages)} 条）：")
+        for index, message in enumerate(session.messages, start=1):
+            role = str(message.get("role", "unknown"))
+            content = message.get("content")
+            if content is None:
+                content = ""
+            line = f"  {index}. {role}: {content}"
+            tool_calls = message.get("tool_calls")
+            if tool_calls:
+                line += f" [tool_calls={len(tool_calls)}]"
+            if message.get("tool_call_id"):
+                line += f" [tool_call_id={message['tool_call_id']}]"
+            self.console.write(line)
+
     async def _chat_loop(
         self,
         provider: LLMProvider,
         selection: Selection,
     ) -> bool:
         """运行多轮聊天；返回 False 表示退出。"""
+        if self.session_manager is not None:
+            return await self._chat_loop_with_session(provider, selection)
         runner = AgentRunner(provider=provider, tools=self.tools)
         messages: list[Message] = []
 
@@ -582,6 +828,20 @@ class InteractiveCLI:
             messages = result.messages
 
 
-async def run_interactive_cli() -> None:
-    """启动交互式 CLI 的便捷入口。"""
-    await InteractiveCLI().run()
+async def run_interactive_cli(
+    workspace: str | Path | None = None,
+    data_root: Path | None = None,
+    max_iterations: int = 32,
+) -> None:
+    """启动 V1 交互式 CLI。
+
+    Args:
+        workspace: 显式 ``--workspace``；为 None 时使用调用进程的 cwd。
+        data_root: Session 数据目录；默认 ``~/.mini-harness``。
+        max_iterations: 单次 Agent 运行的最大迭代次数。
+    """
+    await InteractiveCLI(
+        workspace=workspace if workspace is not None else Path.cwd(),
+        data_root=data_root,
+        max_iterations=max_iterations,
+    ).run()

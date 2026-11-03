@@ -28,6 +28,10 @@ class AgentRunSpec:
             消息。Runner 会深拷贝它，不修改调用方持有的列表。
         max_iterations: 最多允许的“模型调用”轮数。即使模型持续请求工具，
             循环也不会无限执行。
+        system_prompt: 每轮调用 Provider 时临时拼接的 system message；
+            不会写入 result.messages 或 Session。
+        finalize_on_max_iterations: 预算耗尽时是否额外请求一次不带工具的
+            最终总结，避免只返回“未生成最终回答”。
 
     Returns:
         作为 ``AgentRunner.run`` 的入参。
@@ -38,7 +42,9 @@ class AgentRunSpec:
     """
 
     initial_messages: list[Message] = field(default_factory=list)
-    max_iterations: int = 8
+    max_iterations: int = 32
+    system_prompt: str = ""
+    finalize_on_max_iterations: bool = True
 
 
 @dataclass(slots=True)
@@ -46,13 +52,15 @@ class AgentRunResult:
     """一次 Agent 运行的最终结果。
 
     Args:
-        final_content: 最终文本回答；若达到 max_iterations 仍未得到最终
-            回答，则为 None。
+        final_content: 最终文本回答；若达到 max_iterations 且收尾调用
+            也没有产生回答，则为 None。
         messages: 完整消息历史，包括 user、assistant tool_calls、tool 结果
             以及最终 assistant 回答。
         tools_used: 成功执行的工具名列表（按执行顺序，允许重复）。
         stop_reason: ``"completed"`` 表示正常得到最终回答；
-            ``"max_iterations"`` 表示达到迭代上限。
+            ``"max_iterations_finalized"`` 表示预算耗尽后通过一次
+            无工具的收尾调用得到了总结；``"max_iterations"`` 表示达到
+            迭代上限且收尾也没有产生最终回答。
 
     Returns:
         交给 AgentLoop 生成 OutboundMessage 的结构化结果。
@@ -113,6 +121,23 @@ class AgentRunner:
         messages: list[Message] = deepcopy(spec.initial_messages)
         return await self._run_core(spec, messages)
 
+    @staticmethod
+    def _provider_messages(
+        spec: AgentRunSpec,
+        messages: list[Message],
+    ) -> list[Message]:
+        """构造只用于本次 Provider 调用的消息列表。
+
+        System Prompt 是运行时上下文，不属于会话历史。因此每轮调用都
+        临时拼接它，调用结束后只把普通 messages 交给 Session 保存。
+        """
+        if not spec.system_prompt:
+            return messages
+        return [
+            {"role": "system", "content": spec.system_prompt},
+            *messages,
+        ]
+
     async def _run_core(
         self,
         spec: AgentRunSpec,
@@ -132,7 +157,8 @@ class AgentRunner:
             2. 若带 tool_calls：追加 assistant tool_calls 消息，逐个执行
                工具，追加 role=tool 结果，然后 ``continue`` 进入下一轮。
             3. 若不带 tool_calls：记录并追加最终 assistant 回答，``break``。
-            4. 循环自然耗尽说明达到 max_iterations。
+            4. 循环自然耗尽说明达到 max_iterations；若启用
+               finalize_on_max_iterations，再请求一次不带工具的总结。
 
         上下游:
             AgentRunner.run 调用；provider.chat 的上游是 MockProvider，
@@ -151,7 +177,7 @@ class AgentRunner:
             # 响应后才能决定是否执行工具。这里每一轮都会把完整 messages
             # 传回去，因此第二轮能看到第一轮追加的工具结果。
             response = await self.provider.chat(
-                messages=messages,
+                messages=self._provider_messages(spec, messages),
                 tools=tool_definitions,
             )
 
@@ -212,6 +238,28 @@ class AgentRunner:
             # for 循环没有被 break，说明 max_iterations 轮全部用完，且最后
             # 一轮仍在请求工具或没有给出最终回答。
             stop_reason = "max_iterations"
+
+        if stop_reason == "max_iterations" and spec.finalize_on_max_iterations:
+            # 预算耗尽时再给模型一次「不带工具、只总结」的机会。这样即使
+            # 模型没来得及调用 write_file，也不会只给用户一句空话。
+            response = await self.provider.chat(
+                messages=[
+                    *self._provider_messages(spec, messages),
+                    {
+                        "role": "user",
+                        "content": (
+                            "本轮工具调用预算已经用完。请只根据上面的对话和"
+                            "工具结果，给出简洁的最终回答：说明已经完成了什么、"
+                            "还缺什么、下一步建议。不要再调用工具。"
+                        ),
+                    },
+                ],
+                tools=None,
+            )
+            if response.content and not response.tool_calls:
+                final_content = response.content
+                messages.append({"role": "assistant", "content": final_content})
+                stop_reason = "max_iterations_finalized"
 
         return AgentRunResult(
             final_content=final_content,

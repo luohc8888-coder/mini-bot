@@ -13,6 +13,9 @@ from pathlib import Path
 
 from mini_harness.providers.config import ProviderConfig
 
+DEFAULT_MAX_TOKENS = 4096
+_LEGACY_MAX_TOKENS = 1024
+
 
 @dataclass(frozen=True, slots=True)
 class ProviderProfile:
@@ -26,7 +29,7 @@ class ProviderProfile:
     model: str
     base_url: str = ""
     temperature: float = 0.0
-    max_tokens: int = 1024
+    max_tokens: int = DEFAULT_MAX_TOKENS
     api_key: str = ""
     is_default: bool = False
 
@@ -110,6 +113,16 @@ class ProfileStore:
                 else str(raw_api_key).replace("\r", "").replace("\n", "").strip()
             )
             try:
+                raw_max_tokens = int(
+                    item.get("max_tokens", DEFAULT_MAX_TOKENS)
+                )
+                # 旧版默认值是 1024；显式保存的旧配置也按旧默认值迁移，
+                # 否则代码默认值改了但用户原来的 config.json 仍会被截断。
+                max_tokens = (
+                    DEFAULT_MAX_TOKENS
+                    if raw_max_tokens == _LEGACY_MAX_TOKENS
+                    else raw_max_tokens
+                )
                 profiles.append(
                     ProviderProfile(
                         name=name,
@@ -117,7 +130,7 @@ class ProfileStore:
                         model=model,
                         base_url=base_url,
                         temperature=float(item.get("temperature", 0.0)),
-                        max_tokens=int(item.get("max_tokens", 1024)),
+                        max_tokens=max_tokens,
                         api_key=api_key,
                         is_default=bool(item.get("is_default", False)),
                     )

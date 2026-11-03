@@ -34,7 +34,7 @@ class ProviderConfig:
     api_key: str = ""
     base_url: str = ""
     temperature: float = 0.0
-    max_tokens: int = 1024
+    max_tokens: int = 4096
     timeout: float = 60.0
     extra_headers: dict[str, str] = field(default_factory=dict)
     protocol: str = ""

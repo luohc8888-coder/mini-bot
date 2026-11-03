@@ -1,17 +1,22 @@
 """AgentLoop：从 MessageBus 消费消息并驱动 AgentRunner。
 
-V0 只有一个消费者，按到达顺序逐条处理。Loop 不直接调用 Provider，
-也不执行工具；它只负责输入适配、调用 Runner、发布 OutboundMessage。
+V1 仍只有一个消费者，按到达顺序逐条处理。Loop 不直接调用 Provider，
+也不执行工具；它负责输入适配、Session 历史读写、调用 Runner 并发布
+OutboundMessage。
 """
 
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from typing import Any
 
 from mini_harness.bus.events import InboundMessage, OutboundMessage
 from mini_harness.bus.queue import MessageBus
+from mini_harness.providers import ProviderError
+from mini_harness.session import SessionError, SessionManager
 
+from .prompt import build_system_prompt
 from .runner import AgentRunSpec, AgentRunner
 
 
@@ -28,6 +33,9 @@ class AgentLoop:
     上下游:
         main.py 创建并 ``asyncio.create_task(agent_loop.run())``；CLI 通过
         MessageBus 投递 InboundMessage。
+
+        ``session_manager`` 为可选参数：传入时启用 V1 Session 历史加载、
+        更新和原子持久化；不传时保持 V0 的单轮无状态行为。
     """
 
     def __init__(
@@ -35,14 +43,16 @@ class AgentLoop:
         bus: MessageBus,
         runner: AgentRunner,
         *,
-        max_iterations: int = 8,
+        max_iterations: int = 32,
         poll_interval: float = 0.1,
+        session_manager: SessionManager | None = None,
     ) -> None:
         """保存依赖并初始化运行状态。"""
         self.bus = bus
         self.runner = runner
         self._max_iterations = max_iterations
         self._poll_interval = poll_interval
+        self._session_manager = session_manager
         self._running = False
         # stop() 可能在 run() 所在 task 首次被调度前就被调用。单独的
         # _stop_requested 可以保留这个停止意图，避免 run() 启动时被
@@ -53,6 +63,11 @@ class AgentLoop:
     def running(self) -> bool:
         """Loop 当前是否处于运行状态。"""
         return self._running
+
+    @property
+    def session_manager(self) -> SessionManager | None:
+        """返回注入的 SessionManager；V0 模式下为 None。"""
+        return self._session_manager
 
     async def run(self) -> None:
         """启动单消费者循环，直到调用 ``stop()``。
@@ -139,27 +154,155 @@ class AgentLoop:
             上游 ``_dispatch_inbound``；下游 ``AgentRunner.run``。本方法
             不直接调用 Provider 或 ToolRegistry，保持 Loop 的调度职责。
         """
-        # V0 没有 Session/历史持久化，每条入站消息都从一条 user 消息开始。
+        if self._session_manager is None:
+            return await self._process_stateless(message)
+        return await self._process_with_session(message)
+
+    async def _process_stateless(self, message: InboundMessage) -> OutboundMessage:
+        """保持 V0 行为：每条入站消息都从一条 user 消息开始。"""
         spec = AgentRunSpec(
             initial_messages=[{"role": "user", "content": message.content}],
             max_iterations=self._max_iterations,
         )
-        # await Runner：完成完整的模型/工具多轮循环后才返回最终结果。
         result = await self.runner.run(spec)
+        return self._result_to_outbound(message, result)
 
+    async def _process_with_session(
+        self,
+        message: InboundMessage,
+    ) -> OutboundMessage:
+        """加载历史、运行 Runner、保存完整历史，再返回本轮结果。"""
+        manager = self._session_manager
+        assert manager is not None
+        try:
+            session = manager.load()
+        except SessionError as exc:
+            return self._error_outbound(
+                message,
+                f"Session 加载失败：{exc}",
+                error="session_load_error",
+            )
+        except Exception as exc:  # noqa: BLE001 - 加载失败必须向 CLI 报告
+            return self._error_outbound(
+                message,
+                f"Session 加载失败：{type(exc).__name__}: {exc}",
+                error="session_load_error",
+            )
+
+        history = deepcopy(session.messages)
+        input_messages = [
+            *history,
+            {"role": "user", "content": message.content},
+        ]
+        try:
+            result = await self.runner.run(
+                AgentRunSpec(
+                    initial_messages=input_messages,
+                    max_iterations=self._max_iterations,
+                    system_prompt=build_system_prompt(manager.workspace),
+                    finalize_on_max_iterations=True,
+                )
+            )
+        except ProviderError as exc:
+            return self._error_outbound(
+                message,
+                f"Provider 错误：{exc}",
+                error="provider_error",
+            )
+        except Exception as exc:  # noqa: BLE001 - Loop 必须向 CLI 报告错误
+            return self._error_outbound(
+                message,
+                f"Agent 运行失败：{type(exc).__name__}: {exc}",
+                error="agent_error",
+            )
+
+        # 未完成/未收尾的回合不能污染 Session。只有正常完成，或预算耗尽
+        # 后成功执行 finalize_on_max_iterations 的回合才允许持久化。
+        if result.stop_reason not in {"completed", "max_iterations_finalized"}:
+            return self._error_outbound(
+                message,
+                "本轮未完成，未保存到 Session。可以缩小任务范围后重试。",
+                error="agent_incomplete",
+            )
+
+        # Runner 的约定是返回“输入消息 + 本轮新增消息”的完整列表。不能
+        # 用 result.messages[len(history):] 直接切片，因为未来 ContextBuilder
+        # 可能改变输入和输出的边界；这里先验证严格前缀关系。
+        if (
+            not isinstance(result.messages, list)
+            or len(result.messages) < len(input_messages)
+            or result.messages[: len(input_messages)] != input_messages
+        ):
+            return self._error_outbound(
+                message,
+                "Session 历史更新失败：Runner 返回的消息历史不是输入历史的"
+                "完整前缀，已拒绝保存。",
+                error="session_history_error",
+            )
+
+        session.messages = deepcopy(result.messages)
+        try:
+            manager.save(session)
+        except SessionError as exc:
+            # 保存失败时不发布正常完成结果；原 Session 文件由原子写入
+            # 机制保护，不会被清空或部分覆盖。
+            return self._error_outbound(
+                message,
+                f"Session 保存失败：{exc}",
+                error="session_save_error",
+            )
+        except Exception as exc:  # noqa: BLE001 - 保存失败必须向 CLI 报告
+            return self._error_outbound(
+                message,
+                f"Session 保存失败：{type(exc).__name__}: {exc}",
+                error="session_save_error",
+            )
+
+        return self._result_to_outbound(
+            message,
+            result,
+            history_count=len(session.messages),
+        )
+
+    def _result_to_outbound(
+        self,
+        message: InboundMessage,
+        result: Any,
+        *,
+        history_count: int | None = None,
+    ) -> OutboundMessage:
+        """把 AgentRunResult 转换成 OutboundMessage。"""
         content = result.final_content
         if content is None:
-            # Runner 达到迭代上限且没有最终文本；仍然发布可读提示，避免
-            # CLI 等待一个空消息。stop_reason 保留精确原因供调试。
             content = "已达到最大迭代次数，未生成最终回答。"
-
         metadata: dict[str, Any] = {
             "stop_reason": result.stop_reason,
             "tools_used": list(result.tools_used),
             "inbound_metadata": dict(message.metadata),
         }
+        if history_count is not None:
+            metadata["history_count"] = history_count
         return OutboundMessage(
             content=content,
             recipient=message.sender,
             metadata=metadata,
+        )
+
+    def _error_outbound(
+        self,
+        message: InboundMessage,
+        content: str,
+        *,
+        error: str,
+    ) -> OutboundMessage:
+        """构造可展示给 CLI 的错误出站消息，不伪装成正常完成。"""
+        return OutboundMessage(
+            content=content,
+            recipient=message.sender,
+            metadata={
+                "error": error,
+                "stop_reason": error,
+                "tools_used": [],
+                "inbound_metadata": dict(message.metadata),
+            },
         )

@@ -67,7 +67,7 @@ class OpenAICompatibleProvider(LLMProvider):
         base_url: str,
         model: str,
         temperature: float = 0.0,
-        max_tokens: int = 1024,
+        max_tokens: int = 4096,
         timeout: float = 60.0,
         extra_headers: dict[str, str] | None = None,
         transport: httpx.AsyncBaseTransport | None = None,

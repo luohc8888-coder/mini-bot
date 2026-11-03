@@ -204,6 +204,32 @@ async def test_choose_model_uses_preset_default_index(tmp_path: Path) -> None:
     assert any("请选择模型 [4]" in prompt for prompt in console.prompts)
 
 
+def test_profile_store_migrates_legacy_max_tokens(tmp_path: Path) -> None:
+    """旧配置中的 1024 默认值应迁移为 4096，避免长报告被截断。"""
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "profiles": [
+                    {
+                        "name": "legacy",
+                        "provider": "custom",
+                        "model": "m",
+                        "max_tokens": 1024,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = ProfileStore(path).load()
+
+    assert len(loaded) == 1
+    assert loaded[0].max_tokens == 4096
+
+
 def test_profile_store_handles_null_base_url_and_non_utf8(tmp_path: Path) -> None:
     """损坏或不完整的 profile 不应让 CLI 启动崩溃。"""
     path = tmp_path / "config.json"

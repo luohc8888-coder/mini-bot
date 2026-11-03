@@ -21,6 +21,7 @@ from collections.abc import Sequence
 from ..agent import AgentLoop, AgentRunner
 from ..bus import InboundMessage, MessageBus
 from ..providers import create_mock_provider
+from ..workspace import WorkspaceError
 from ..tools import AddTool, ToolRegistry
 from . import print_provider_catalog, run_interactive_cli
 
@@ -44,7 +45,7 @@ async def run_demo() -> None:
 
     provider = build_demo_provider()
     runner = AgentRunner(provider=provider, tools=registry)
-    agent_loop = AgentLoop(bus=bus, runner=runner, max_iterations=8)
+    agent_loop = AgentLoop(bus=bus, runner=runner, max_iterations=32)
 
     # AgentLoop.run 是常驻循环，用 create_task 并发启动，主协程才能继续
     # 投递入站消息并等待出站结果。
@@ -85,6 +86,19 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         action="store_true",
         help="列出所有内置 Provider 预设后退出",
     )
+    parser.add_argument(
+        "--workspace",
+        metavar="PATH",
+        default=None,
+        help="指定 Workspace；默认使用当前工作目录",
+    )
+    parser.add_argument(
+        "--max-iterations",
+        type=int,
+        default=32,
+        metavar="N",
+        help="单次 Agent 运行的最大模型/工具迭代次数，默认 32",
+    )
     return parser.parse_args(list(argv))
 
 
@@ -105,7 +119,13 @@ async def main(argv: Sequence[str] | None = None) -> None:
         return
 
     if args.interactive or sys.stdin.isatty():
-        await run_interactive_cli()
+        try:
+            await run_interactive_cli(
+                workspace=args.workspace,
+                max_iterations=args.max_iterations,
+            )
+        except WorkspaceError as exc:
+            print(f"Workspace 错误：{exc}", file=sys.stderr)
         return
 
     await run_demo()

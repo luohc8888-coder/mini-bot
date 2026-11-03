@@ -18,6 +18,14 @@ def make_registry() -> ToolRegistry:
     return registry
 
 
+def test_agent_run_spec_defaults_are_sized_for_project_analysis() -> None:
+    """默认预算和收尾开关应适合多文件项目分析。"""
+    spec = AgentRunSpec()
+    assert spec.max_iterations == 32
+    assert spec.system_prompt == ""
+    assert spec.finalize_on_max_iterations is True
+
+
 def add_tool_response(call_id: str = "call_add_1") -> LLMResponse:
     """构造第一次 Provider 响应：请求 add(a=2, b=3)。"""
     return LLMResponse(
@@ -157,6 +165,7 @@ async def test_runner_respects_max_iterations() -> None:
     spec = AgentRunSpec(
         initial_messages=[{"role": "user", "content": "计算 2 + 3"}],
         max_iterations=1,
+        finalize_on_max_iterations=False,
     )
 
     result = await runner.run(spec)
@@ -172,6 +181,65 @@ async def test_runner_respects_max_iterations() -> None:
     # 即使是最后一轮，assistant tool_call 与 tool 结果也保持配对。
     assert result.messages[1]["tool_calls"][0]["id"] == "call_once"
     assert result.messages[2]["tool_call_id"] == "call_once"
+
+
+@pytest.mark.asyncio
+async def test_runner_finalizes_after_max_iterations() -> None:
+    """预算耗尽后会额外请求一次不带工具的总结。"""
+    provider = MockProvider(
+        [
+            add_tool_response("call_once"),
+            LLMResponse(
+                content="已读取工具结果，但预算耗尽，未能写报告。",
+                finish_reason="stop",
+            ),
+        ]
+    )
+    runner = AgentRunner(provider=provider, tools=make_registry())
+    result = await runner.run(
+        AgentRunSpec(
+            initial_messages=[{"role": "user", "content": "分析项目"}],
+            max_iterations=1,
+        )
+    )
+
+    assert result.stop_reason == "max_iterations_finalized"
+    assert result.final_content == "已读取工具结果，但预算耗尽，未能写报告。"
+    assert provider.call_count == 2
+    assert [message["role"] for message in result.messages] == [
+        "user",
+        "assistant",
+        "tool",
+        "assistant",
+    ]
+    assert "预算已经用完" in provider.received_messages[1][-1]["content"]
+    assert provider.received_messages[1][-1]["role"] == "user"
+
+
+@pytest.mark.asyncio
+async def test_runner_system_prompt_is_provider_only() -> None:
+    """System Prompt 只发给 Provider，不进入 result.messages。"""
+    provider = MockProvider([LLMResponse(content="完成", finish_reason="stop")])
+    runner = AgentRunner(provider=provider, tools=make_registry())
+    system_prompt = "你是测试助手。"
+
+    result = await runner.run(
+        AgentRunSpec(
+            initial_messages=[{"role": "user", "content": "你好"}],
+            max_iterations=2,
+            system_prompt=system_prompt,
+        )
+    )
+
+    assert provider.received_messages[0][0] == {
+        "role": "system",
+        "content": system_prompt,
+    }
+    assert result.messages == [
+        {"role": "user", "content": "你好"},
+        {"role": "assistant", "content": "完成"},
+    ]
+    assert all(message["role"] != "system" for message in result.messages)
 
 
 @pytest.mark.asyncio

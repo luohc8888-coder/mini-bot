@@ -22,6 +22,11 @@ from mini_harness.providers.presets import PRESETS
 from mini_harness.tools import AddTool, ToolRegistry
 
 
+def test_provider_config_defaults_allow_long_reports() -> None:
+    """默认 max_tokens 应足够生成一份项目总览 Markdown。"""
+    assert ProviderConfig(provider="custom").max_tokens == 4096
+
+
 def test_grouped_presets_cover_all_presets_and_huawei_models() -> None:
     """菜单分组必须覆盖全部预设，并包含截图中的华为云模型。"""
     grouped_keys = [
@@ -440,7 +445,7 @@ async def test_openai_reasoning_model_uses_max_completion_tokens() -> None:
 
     payload = seen["payload"]
     assert isinstance(payload, dict)
-    assert payload["max_completion_tokens"] == 1024
+    assert payload["max_completion_tokens"] == 4096
     assert "max_tokens" not in payload
     assert "temperature" not in payload
 
