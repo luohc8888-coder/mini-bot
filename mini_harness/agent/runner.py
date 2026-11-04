@@ -13,7 +13,9 @@ from typing import Any
 from mini_harness.providers.base import (
     LLMProvider,
     Message,
+    TextDeltaCallback,
     ToolDefinition,
+    ToolStartCallback,
 )
 from mini_harness.tools.base import ToolResult
 from mini_harness.tools.registry import ToolRegistry
@@ -32,6 +34,9 @@ class AgentRunSpec:
             不会写入 result.messages 或 Session。
         finalize_on_max_iterations: 预算耗尽时是否额外请求一次不带工具的
             最终总结，避免只返回“未生成最终回答”。
+        on_text_delta: 流式文本增量回调；Provider 产生可见文本时调用。
+            该回调只影响展示，不会把中间 chunk 写入 result.messages。
+        on_tool_start: 工具开始执行前的可选回调，参数为工具名。
 
     Returns:
         作为 ``AgentRunner.run`` 的入参。
@@ -45,6 +50,8 @@ class AgentRunSpec:
     max_iterations: int = 32
     system_prompt: str = ""
     finalize_on_max_iterations: bool = True
+    on_text_delta: TextDeltaCallback | None = None
+    on_tool_start: ToolStartCallback | None = None
 
 
 @dataclass(slots=True)
@@ -61,6 +68,8 @@ class AgentRunResult:
             ``"max_iterations_finalized"`` 表示预算耗尽后通过一次
             无工具的收尾调用得到了总结；``"max_iterations"`` 表示达到
             迭代上限且收尾也没有产生最终回答。
+        streamed_final: 最终回答是否已经通过 on_text_delta 实时输出；
+            CLI 据此避免把同一段回答再打印一次。
 
     Returns:
         交给 AgentLoop 生成 OutboundMessage 的结构化结果。
@@ -74,6 +83,7 @@ class AgentRunResult:
     messages: list[Message]
     tools_used: list[str] = field(default_factory=list)
     stop_reason: str = "completed"
+    streamed_final: bool = False
 
 
 class AgentRunner:
@@ -138,6 +148,56 @@ class AgentRunner:
             *messages,
         ]
 
+    async def _request(
+        self,
+        spec: AgentRunSpec,
+        messages: list[Message],
+        tools: list[ToolDefinition] | None,
+    ) -> tuple[Any, bool]:
+        """调用 Provider，并在配置了回调时走流式接口。
+
+        Returns:
+            ``(response, streamed)``。streamed 表示本次响应是否真的产生过
+            文本增量；它用于区分“流式已展示最终回答”和“需要 CLI 补打印”。
+        """
+        streamed = False
+
+        def emit_delta(text: str) -> None:
+            nonlocal streamed
+            if not text:
+                return
+            streamed = True
+            if spec.on_text_delta is not None:
+                spec.on_text_delta(text)
+
+        provider_messages = self._provider_messages(spec, messages)
+
+        # 没有回调时保持原来的非流式路径，避免改变库调用方的行为。
+        if spec.on_text_delta is None:
+            response = await self.provider.chat(
+                messages=provider_messages,
+                tools=tools,
+            )
+            return response, False
+
+        chat_stream = getattr(self.provider, "chat_stream", None)
+        if callable(chat_stream):
+            response = await chat_stream(
+                messages=provider_messages,
+                tools=tools,
+                on_text_delta=emit_delta,
+            )
+        else:
+            # 兼容只实现 chat 的第三方 Provider：完整拿到响应后一次性
+            # 回调，至少保证 CLI 不会重复打印最终回答。
+            response = await self.provider.chat(
+                messages=provider_messages,
+                tools=tools,
+            )
+            if response.content:
+                emit_delta(response.content)
+        return response, streamed
+
     async def _run_core(
         self,
         spec: AgentRunSpec,
@@ -167,6 +227,7 @@ class AgentRunner:
         final_content: str | None = None
         tools_used: list[str] = []
         stop_reason = "max_iterations"
+        streamed_final = False
 
         # 工具定义在本轮运行中不会变化，提前导出一次即可。传给 Provider
         # 后，真实模型才能知道 add 的名称和参数 Schema。
@@ -176,9 +237,10 @@ class AgentRunner:
             # await Provider.chat：模拟/真实模型调用都是异步 I/O，必须等待
             # 响应后才能决定是否执行工具。这里每一轮都会把完整 messages
             # 传回去，因此第二轮能看到第一轮追加的工具结果。
-            response = await self.provider.chat(
-                messages=self._provider_messages(spec, messages),
-                tools=tool_definitions,
+            response, streamed = await self._request(
+                spec,
+                messages,
+                tool_definitions,
             )
 
             if response.should_execute_tools:
@@ -198,6 +260,8 @@ class AgentRunner:
                 # 多工具场景下不能在第一个结果后就进入下一轮，因此放在
                 # 同一个 for 循环内全部执行完。
                 for tool_call in response.tool_calls:
+                    if spec.on_tool_start is not None:
+                        spec.on_tool_start(tool_call.name)
                     # await 工具执行，保证本 result 在下一轮模型调用前
                     # 已经追加到 messages。
                     result: ToolResult = await self.tools.execute(
@@ -226,6 +290,9 @@ class AgentRunner:
             final_content = (
                 response.content if response.content is not None else ""
             )
+            # 只有非空最终回答才值得跳过 CLI 的补打印；空响应仍走原有
+            # “模型返回了空内容”的提示逻辑。
+            streamed_final = bool(streamed and final_content.strip())
             # 空 assistant 消息不应进入后续上下文；否则真实模型可能收到
             # 空的 assistant content，导致下一轮行为不稳定。CLI 会单独
             # 显示“模型返回了空内容”的提示。
@@ -242,9 +309,10 @@ class AgentRunner:
         if stop_reason == "max_iterations" and spec.finalize_on_max_iterations:
             # 预算耗尽时再给模型一次「不带工具、只总结」的机会。这样即使
             # 模型没来得及调用 write_file，也不会只给用户一句空话。
-            response = await self.provider.chat(
-                messages=[
-                    *self._provider_messages(spec, messages),
+            response, streamed = await self._request(
+                spec,
+                [
+                    *messages,
                     {
                         "role": "user",
                         "content": (
@@ -254,10 +322,11 @@ class AgentRunner:
                         ),
                     },
                 ],
-                tools=None,
+                None,
             )
             if response.content and not response.tool_calls:
                 final_content = response.content
+                streamed_final = bool(streamed and final_content.strip())
                 messages.append({"role": "assistant", "content": final_content})
                 stop_reason = "max_iterations_finalized"
 
@@ -266,4 +335,5 @@ class AgentRunner:
             messages=messages,
             tools_used=tools_used,
             stop_reason=stop_reason,
+            streamed_final=streamed_final,
         )

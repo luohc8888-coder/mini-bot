@@ -11,7 +11,13 @@ import asyncio
 from collections.abc import Callable, Sequence
 from copy import deepcopy
 
-from .base import LLMProvider, LLMResponse, Message, ToolDefinition
+from .base import (
+    LLMProvider,
+    LLMResponse,
+    Message,
+    TextDeltaCallback,
+    ToolDefinition,
+)
 
 # 响应序列中的一步既可以是固定 LLMResponse，也可以是一个根据当前 messages
 # 动态构造响应的工厂函数。后者用于让第二次响应真正读取工具结果。
@@ -30,11 +36,17 @@ class MockProvider(LLMProvider):
         - 响应序列耗尽时抛出 RuntimeError，防止测试静默通过。
     """
 
-    def __init__(self, responses: Sequence[LLMResponse | ResponseFactory]) -> None:
+    def __init__(
+        self,
+        responses: Sequence[LLMResponse | ResponseFactory],
+        *,
+        stream_chunk_size: int = 8,
+    ) -> None:
         """保存预设响应序列并初始化调用游标。
 
         Args:
             responses: 预设响应列表，不可为空（为空时首次 chat 会报错）。
+            stream_chunk_size: 模拟流式输出时每块的字符数。
 
         Returns:
             None。
@@ -45,6 +57,7 @@ class MockProvider(LLMProvider):
         """
         self._responses = list(responses)
         self._cursor = 0
+        self.stream_chunk_size = max(1, stream_chunk_size)
         self.received_messages: list[list[Message]] = []
 
     @property
@@ -121,3 +134,19 @@ class MockProvider(LLMProvider):
         if callable(step):
             return step(deepcopy(messages))
         return step
+
+    async def chat_stream(
+        self,
+        messages: list[Message],
+        tools: list[ToolDefinition] | None = None,
+        on_text_delta: TextDeltaCallback | None = None,
+    ) -> LLMResponse:
+        """按固定字符块模拟流式文本，便于测试 CLI 渲染。"""
+        response = await self.chat(messages=messages, tools=tools)
+        if on_text_delta is None or not response.content:
+            return response
+        content = response.content
+        for start in range(0, len(content), self.stream_chunk_size):
+            on_text_delta(content[start : start + self.stream_chunk_size])
+            await asyncio.sleep(0)
+        return response

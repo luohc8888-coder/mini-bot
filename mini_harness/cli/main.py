@@ -99,6 +99,20 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         metavar="N",
         help="单次 Agent 运行的最大模型/工具迭代次数，默认 32",
     )
+    stream_mode = parser.add_mutually_exclusive_group()
+    stream_mode.add_argument(
+        "--stream",
+        action="store_true",
+        dest="stream",
+        help="启用流式输出（默认开启）",
+    )
+    stream_mode.add_argument(
+        "--no-stream",
+        action="store_false",
+        dest="stream",
+        help="关闭流式输出，等待模型完整回答后一次性打印",
+    )
+    parser.set_defaults(stream=True)
     return parser.parse_args(list(argv))
 
 
@@ -123,6 +137,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
             await run_interactive_cli(
                 workspace=args.workspace,
                 max_iterations=args.max_iterations,
+                stream=args.stream,
             )
         except WorkspaceError as exc:
             print(f"Workspace 错误：{exc}", file=sys.stderr)

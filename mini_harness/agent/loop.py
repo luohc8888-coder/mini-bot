@@ -14,6 +14,7 @@ from typing import Any
 from mini_harness.bus.events import InboundMessage, OutboundMessage
 from mini_harness.bus.queue import MessageBus
 from mini_harness.providers import ProviderError
+from mini_harness.providers.base import TextDeltaCallback, ToolStartCallback
 from mini_harness.session import SessionError, SessionManager
 
 from .prompt import build_system_prompt
@@ -29,6 +30,8 @@ class AgentLoop:
         max_iterations: 每个消息交给 Runner 时的最大模型调用轮数。
         poll_interval: 无消息时等待多久检查一次停止标记。V0 用短超时
             实现可正常退出的常驻循环，不引入 Session 队列或后台任务。
+        on_text_delta: 可选的流式文本回调；CLI 用它实时渲染 Token。
+        on_tool_start: 可选的工具开始回调；CLI 用来在流式文本之间穿插工具提示。
 
     上下游:
         main.py 创建并 ``asyncio.create_task(agent_loop.run())``；CLI 通过
@@ -46,6 +49,8 @@ class AgentLoop:
         max_iterations: int = 32,
         poll_interval: float = 0.1,
         session_manager: SessionManager | None = None,
+        on_text_delta: TextDeltaCallback | None = None,
+        on_tool_start: ToolStartCallback | None = None,
     ) -> None:
         """保存依赖并初始化运行状态。"""
         self.bus = bus
@@ -53,6 +58,8 @@ class AgentLoop:
         self._max_iterations = max_iterations
         self._poll_interval = poll_interval
         self._session_manager = session_manager
+        self._on_text_delta = on_text_delta
+        self._on_tool_start = on_tool_start
         self._running = False
         # stop() 可能在 run() 所在 task 首次被调度前就被调用。单独的
         # _stop_requested 可以保留这个停止意图，避免 run() 启动时被
@@ -159,10 +166,12 @@ class AgentLoop:
         return await self._process_with_session(message)
 
     async def _process_stateless(self, message: InboundMessage) -> OutboundMessage:
-        """保持 V0 行为：每条入站消息都从一条 user 消息开始。"""
+        """每条入站消息都从一条 user 消息开始。"""
         spec = AgentRunSpec(
             initial_messages=[{"role": "user", "content": message.content}],
             max_iterations=self._max_iterations,
+            on_text_delta=self._on_text_delta,
+            on_tool_start=self._on_tool_start,
         )
         result = await self.runner.run(spec)
         return self._result_to_outbound(message, result)
@@ -201,6 +210,8 @@ class AgentLoop:
                     max_iterations=self._max_iterations,
                     system_prompt=build_system_prompt(manager.workspace),
                     finalize_on_max_iterations=True,
+                    on_text_delta=self._on_text_delta,
+                    on_tool_start=self._on_tool_start,
                 )
             )
         except ProviderError as exc:
@@ -278,6 +289,7 @@ class AgentLoop:
         metadata: dict[str, Any] = {
             "stop_reason": result.stop_reason,
             "tools_used": list(result.tools_used),
+            "streamed": bool(getattr(result, "streamed_final", False)),
             "inbound_metadata": dict(message.metadata),
         }
         if history_count is not None:

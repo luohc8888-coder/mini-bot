@@ -6,6 +6,7 @@ Anthropic 与 OpenAI-compatible 协议不同：工具定义使用 input_schema�
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import httpx
@@ -15,6 +16,7 @@ from .base import (
     LLMResponse,
     Message,
     ProviderError,
+    TextDeltaCallback,
     ToolCallRequest,
     ToolDefinition,
 )
@@ -183,6 +185,30 @@ class AnthropicProvider(LLMProvider):
             )
         return converted
 
+    def _build_payload(
+        self,
+        messages: list[Message],
+        tools: list[ToolDefinition] | None,
+        *,
+        stream: bool = False,
+    ) -> dict[str, Any]:
+        """构造普通/流式请求共用的 Anthropic payload。"""
+        system, anthropic_messages = self._convert_messages(messages)
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "max_tokens": self.max_tokens,
+            "temperature": self.temperature,
+            "messages": anthropic_messages,
+        }
+        if system:
+            payload["system"] = system
+        anthropic_tools = self._convert_tools(tools)
+        if anthropic_tools:
+            payload["tools"] = anthropic_tools
+        if stream:
+            payload["stream"] = True
+        return payload
+
     async def chat(
         self,
         messages: list[Message],
@@ -200,18 +226,7 @@ class AnthropicProvider(LLMProvider):
         上下游:
             AgentRunner._run_core await 本方法；ProviderError 由 CLI 捕获。
         """
-        system, anthropic_messages = self._convert_messages(messages)
-        payload: dict[str, Any] = {
-            "model": self.model,
-            "max_tokens": self.max_tokens,
-            "temperature": self.temperature,
-            "messages": anthropic_messages,
-        }
-        if system:
-            payload["system"] = system
-        anthropic_tools = self._convert_tools(tools)
-        if anthropic_tools:
-            payload["tools"] = anthropic_tools
+        payload = self._build_payload(messages, tools)
 
         try:
             async with httpx.AsyncClient(
@@ -270,6 +285,133 @@ class AnthropicProvider(LLMProvider):
             content="".join(text_parts) or None,
             tool_calls=tool_calls,
             finish_reason=str(data.get("stop_reason") or "stop"),
+        )
+
+    @staticmethod
+    def _parse_stream_arguments(raw: str) -> dict[str, Any]:
+        """解析流式累积的 tool_use JSON；异常时保留原文给工具层报告。"""
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {"_raw": raw}
+        return parsed if isinstance(parsed, dict) else {"_raw": parsed}
+
+    async def chat_stream(
+        self,
+        messages: list[Message],
+        tools: list[ToolDefinition] | None = None,
+        on_text_delta: TextDeltaCallback | None = None,
+    ) -> LLMResponse:
+        """通过 Anthropic SSE 流式读取文本与 tool_use 参数。"""
+        if on_text_delta is None:
+            return await self.chat(messages=messages, tools=tools)
+
+        payload = self._build_payload(messages, tools, stream=True)
+        text_parts: list[str] = []
+        tool_buffers: dict[int, dict[str, Any]] = {}
+        finish_reason = "stop"
+
+        try:
+            async with httpx.AsyncClient(
+                timeout=self.timeout,
+                transport=self.transport,
+            ) as client:
+                async with client.stream(
+                    "POST",
+                    self.messages_url,
+                    headers=self._headers(),
+                    json=payload,
+                ) as response:
+                    if response.status_code >= 400:
+                        await response.aread()
+                        raise ProviderError(self._format_http_error(response))
+
+                    async for line in response.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        data = line[len("data:") :].strip()
+                        if not data:
+                            continue
+                        try:
+                            event = json.loads(data)
+                        except json.JSONDecodeError:
+                            continue
+                        if not isinstance(event, dict):
+                            continue
+                        event_type = event.get("type")
+
+                        if event_type == "content_block_start":
+                            block = event.get("content_block")
+                            if not isinstance(block, dict):
+                                continue
+                            try:
+                                index = int(event.get("index", 0))
+                            except (TypeError, ValueError):
+                                index = 0
+                            if block.get("type") == "text":
+                                initial = str(block.get("text", ""))
+                                if initial:
+                                    text_parts.append(initial)
+                                    on_text_delta(initial)
+                            elif block.get("type") == "tool_use":
+                                tool_buffers[index] = {
+                                    "id": str(block.get("id", "")),
+                                    "name": str(block.get("name", "")),
+                                    "arguments": "",
+                                }
+                        elif event_type == "content_block_delta":
+                            delta = event.get("delta")
+                            if not isinstance(delta, dict):
+                                continue
+                            try:
+                                index = int(event.get("index", 0))
+                            except (TypeError, ValueError):
+                                index = 0
+                            if delta.get("type") == "text_delta":
+                                text = str(delta.get("text", ""))
+                                if text:
+                                    text_parts.append(text)
+                                    on_text_delta(text)
+                            elif delta.get("type") == "input_json_delta":
+                                buffer = tool_buffers.setdefault(
+                                    index,
+                                    {"id": "", "name": "", "arguments": ""},
+                                )
+                                buffer["arguments"] += str(
+                                    delta.get("partial_json", "")
+                                )
+                        elif event_type == "message_delta":
+                            delta = event.get("delta")
+                            if isinstance(delta, dict):
+                                finish_reason = str(
+                                    delta.get("stop_reason") or finish_reason
+                                )
+        except ImportError as exc:
+            raise ProviderError(
+                "无法初始化 HTTP 客户端，可能是 SOCKS 代理依赖缺失。"
+                "请运行 `uv sync`，或安装 `httpx[socks]` 后重试。"
+            ) from exc
+        except httpx.RequestError as exc:
+            raise ProviderError(
+                f"{self.provider_name} 网络请求失败：{exc}"
+            ) from exc
+
+        tool_calls = [
+            ToolCallRequest(
+                id=str(tool_buffers[index].get("id", "")),
+                name=str(tool_buffers[index].get("name", "")),
+                arguments=self._parse_stream_arguments(
+                    str(tool_buffers[index].get("arguments", ""))
+                ),
+            )
+            for index in sorted(tool_buffers)
+        ]
+        return LLMResponse(
+            content="".join(text_parts) or None,
+            tool_calls=tool_calls,
+            finish_reason=finish_reason,
         )
 
     def _format_http_error(self, response: httpx.Response) -> str:

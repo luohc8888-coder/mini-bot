@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
@@ -13,6 +14,10 @@ from typing import Any
 Message = dict[str, Any]
 # ToolRegistry.get_definitions() 返回的工具 Schema（OpenAI function 格式）。
 ToolDefinition = dict[str, Any]
+# 流式文本增量回调；Provider 每产生一段可见文本就调用一次。
+TextDeltaCallback = Callable[[str], None]
+# 工具开始执行回调，CLI 可用于在流式输出中插入工具提示。
+ToolStartCallback = Callable[[str], None]
 
 
 class ProviderError(RuntimeError):
@@ -124,3 +129,28 @@ class LLMProvider(ABC):
             必须把 I/O 放在 await 后面，避免阻塞事件循环。
         """
         raise NotImplementedError
+
+    async def chat_stream(
+        self,
+        messages: list[Message],
+        tools: list[ToolDefinition] | None = None,
+        on_text_delta: TextDeltaCallback | None = None,
+    ) -> LLMResponse:
+        """带文本增量回调的聊天接口。
+
+        默认实现退化为一次普通 chat：完整回答生成后把 content 一次性
+        回调给调用方。支持 SSE 的 Provider 应覆盖本方法，实现真正的
+        边接收边回调。
+
+        Args:
+            messages: 完整对话历史。
+            tools: 工具定义。
+            on_text_delta: 文本增量回调；None 表示不需要流式。
+
+        Returns:
+            完整的 LLMResponse，工具调用已经聚合完成。
+        """
+        response = await self.chat(messages=messages, tools=tools)
+        if on_text_delta is not None and response.content:
+            on_text_delta(response.content)
+        return response

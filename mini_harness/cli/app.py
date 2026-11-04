@@ -27,7 +27,7 @@ from mini_harness.providers import (
     get_preset,
     grouped_presets,
 )
-from mini_harness.providers.base import Message
+from mini_harness.providers.base import Message, TextDeltaCallback
 from mini_harness.session import (
     SessionError,
     SessionManager,
@@ -105,6 +105,19 @@ class Console:
             )
         self.write(formatted)
 
+    def write_stream_start(self) -> None:
+        """开始一条流式助手消息，只打印一次角色标签。"""
+        label = self._style("助手 >", self._ASSISTANT_COLOR)
+        print(f"{label} ", end="", flush=True)
+
+    def write_stream_delta(self, text: str) -> None:
+        """打印一个流式文本片段，不自动换行。"""
+        print(text, end="", flush=True)
+
+    def write_stream_end(self) -> None:
+        """结束流式助手消息并换行。"""
+        print()
+
     def write_tool(self, text: str) -> None:
         """输出工具执行提示，使用黄色。"""
         self.write(f"{self._style('[工具]', self._TOOL_COLOR)} {text}")
@@ -136,6 +149,38 @@ class Console:
         """
         raw = await asyncio.to_thread(getpass.getpass, prompt)
         return raw.replace("\r", "").replace("\n", "").strip()
+
+
+class StreamingAssistantRenderer:
+    """把 Provider 的文本增量渲染成一条连续的助手消息。"""
+
+    def __init__(self, console: Console) -> None:
+        self.console = console
+        self.started = False
+        self.has_output = False
+        self.tools_printed = False
+
+    def on_delta(self, text: str) -> None:
+        """收到一个文本片段；第一次收到时打印角色标签。"""
+        if not text:
+            return
+        if not self.started:
+            self.console.write_stream_start()
+            self.started = True
+        self.console.write_stream_delta(text)
+        self.has_output = True
+
+    def on_tool_start(self, name: str) -> None:
+        """在工具执行前结束当前文本行并打印工具提示。"""
+        self.finish()
+        self.console.write_tool(name)
+        self.tools_printed = True
+
+    def finish(self) -> None:
+        """结束当前流式消息；没有输出时不做任何事。"""
+        if self.started:
+            self.console.write_stream_end()
+            self.started = False
 
 
 def _format_base_url(preset: ProviderPreset) -> str:
@@ -179,6 +224,7 @@ class InteractiveCLI:
         workspace: str | Path | None = None,
         data_root: Path | None = None,
         session_manager: SessionManager | None = None,
+        stream: bool = False,
     ) -> None:
         """初始化 CLI 依赖。
 
@@ -187,10 +233,13 @@ class InteractiveCLI:
                 保持 V0 无 Session 的兼容行为。
             data_root: Session 数据根目录，便于测试或自定义 Harness 状态位置。
             session_manager: 可注入的已有 SessionManager，优先于 workspace。
+            stream: 是否启用流式输出；``run_interactive_cli`` 默认开启，
+                直接实例化时默认关闭以保持旧行为。
         """
         self.console = console or Console()
         self.store = profile_store or ProfileStore()
         self.max_iterations = max_iterations
+        self.stream = stream
         self.tools = ToolRegistry()
         self.tools.register(AddTool())
 
@@ -621,18 +670,29 @@ class InteractiveCLI:
                 self.console.write("未知命令，输入 /help 查看可用命令。")
                 continue
 
+            renderer = (
+                StreamingAssistantRenderer(self.console)
+                if self.stream
+                else None
+            )
             try:
                 outbound = await self._run_session_turn(
                     provider,
                     selection,
                     user_text,
+                    on_text_delta=renderer.on_delta if renderer else None,
+                    on_tool_start=renderer.on_tool_start if renderer else None,
                 )
             except Exception as exc:  # noqa: BLE001 - CLI 兜底展示
+                if renderer:
+                    renderer.finish()
                 self.console.write_error(
                     f"请求失败：{type(exc).__name__}: {exc}"
                 )
                 continue
 
+            if renderer:
+                renderer.finish()
             if outbound.metadata.get("error"):
                 self.console.write_error(outbound.content)
                 continue
@@ -640,21 +700,29 @@ class InteractiveCLI:
             if not answer.strip():
                 answer = "（模型返回了空内容）"
             tools_used = outbound.metadata.get("tools_used", [])
-            if tools_used:
+            # 流式模式下工具提示已经在执行前逐条打印过，避免重复。
+            if tools_used and not (renderer and renderer.tools_printed):
                 self.console.write_tool(", ".join(tools_used))
-            self.console.write_assistant(answer)
+            # 流式回调已经打印过最终回答时，不能再次 write_assistant。
+            if not outbound.metadata.get("streamed"):
+                self.console.write_assistant(answer)
 
     async def _run_session_turn(
         self,
         provider: LLMProvider,
         selection: Selection,
         user_text: str,
+        on_text_delta: TextDeltaCallback | None = None,
+        on_tool_start: Callable[[str], None] | None = None,
     ) -> OutboundMessage:
         """通过一次独立的 AgentLoop 任务处理一个用户回合。
 
         每次用户输入都构造 MessageBus + AgentLoop，把 Session 的加载、
         Runner 调用和保存全部留在 AgentLoop 内，CLI 只负责投递输入和读取
         出站结果。这样也避免 CLI 直接修改 Session 文件。
+
+        Args:
+            on_text_delta: 可选流式回调；由 AgentLoop 透传到 Provider。
         """
         turn_provider = provider
         if selection.preset.protocol == "mock":
@@ -670,6 +738,7 @@ class InteractiveCLI:
             max_iterations=self.max_iterations,
             poll_interval=0.01,
             session_manager=self.session_manager,
+            on_text_delta=on_text_delta,
         )
         loop_task = asyncio.create_task(agent_loop.run())
         try:
@@ -790,6 +859,11 @@ class InteractiveCLI:
                 continue
 
             turn_messages = [*messages, {"role": "user", "content": user_text}]
+            renderer = (
+                StreamingAssistantRenderer(self.console)
+                if self.stream
+                else None
+            )
             try:
                 # MockProvider 的响应序列是有限的（一次工具调用 + 一次最终
                 # 回答），每个用户回合都必须重新创建，否则第二个用户回合
@@ -804,17 +878,24 @@ class InteractiveCLI:
                     AgentRunSpec(
                         initial_messages=turn_messages,
                         max_iterations=self.max_iterations,
+                        on_text_delta=renderer.on_delta if renderer else None,
                     )
                 )
             except ProviderError as exc:
+                if renderer:
+                    renderer.finish()
                 self.console.write_error(f"Provider 错误：{exc}")
                 continue
             except Exception as exc:  # noqa: BLE001 - CLI 需要兜底展示错误
+                if renderer:
+                    renderer.finish()
                 self.console.write_error(
                     f"请求失败：{type(exc).__name__}: {exc}"
                 )
                 continue
 
+            if renderer:
+                renderer.finish()
             answer = result.final_content
             if answer is None:
                 answer = "（已达到最大迭代次数，未生成最终回答）"
@@ -824,7 +905,8 @@ class InteractiveCLI:
                 answer = "（模型返回了空内容）"
             if result.tools_used:
                 self.console.write_tool(", ".join(result.tools_used))
-            self.console.write_assistant(answer)
+            if not result.streamed_final:
+                self.console.write_assistant(answer)
             messages = result.messages
 
 
@@ -832,6 +914,7 @@ async def run_interactive_cli(
     workspace: str | Path | None = None,
     data_root: Path | None = None,
     max_iterations: int = 32,
+    stream: bool = True,
 ) -> None:
     """启动 V1 交互式 CLI。
 
@@ -839,9 +922,11 @@ async def run_interactive_cli(
         workspace: 显式 ``--workspace``；为 None 时使用调用进程的 cwd。
         data_root: Session 数据目录；默认 ``~/.mini-harness``。
         max_iterations: 单次 Agent 运行的最大迭代次数。
+        stream: 是否启用流式输出，默认开启；``--no-stream`` 可关闭。
     """
     await InteractiveCLI(
         workspace=workspace if workspace is not None else Path.cwd(),
         data_root=data_root,
         max_iterations=max_iterations,
+        stream=stream,
     ).run()

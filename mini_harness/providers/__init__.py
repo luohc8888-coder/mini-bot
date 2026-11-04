@@ -6,8 +6,10 @@ from .base import (
     LLMResponse,
     Message,
     ProviderError,
+    TextDeltaCallback,
     ToolCallRequest,
     ToolDefinition,
+    ToolStartCallback,
 )
 from .config import ProviderConfig
 from .factory import (
@@ -36,8 +38,10 @@ __all__ = [
     "ProviderFactory",
     "ProviderPreset",
     "ResponseFactory",
+    "TextDeltaCallback",
     "ToolCallRequest",
     "ToolDefinition",
+    "ToolStartCallback",
     "create_mock_provider",
     "create_provider",
     "get_preset",

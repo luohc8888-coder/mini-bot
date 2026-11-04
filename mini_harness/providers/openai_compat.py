@@ -16,6 +16,7 @@ from .base import (
     LLMResponse,
     Message,
     ProviderError,
+    TextDeltaCallback,
     ToolCallRequest,
     ToolDefinition,
 )
@@ -185,6 +186,68 @@ class OpenAICompatibleProvider(LLMProvider):
             },
         }
 
+    def _build_payload(
+        self,
+        messages: list[Message],
+        tools: list[ToolDefinition] | None,
+        *,
+        stream: bool = False,
+    ) -> dict[str, Any]:
+        """构造普通/流式请求共用的 payload。"""
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": [self._to_openai_message(message) for message in messages],
+        }
+        if self._uses_reasoning_parameters():
+            payload["max_completion_tokens"] = self.max_tokens
+        else:
+            payload["temperature"] = self.temperature
+            payload["max_tokens"] = self.max_tokens
+        if tools:
+            payload["tools"] = tools
+        if stream:
+            payload["stream"] = True
+        return payload
+
+    def _raise_for_status(self, response: httpx.Response) -> None:
+        """把常见 HTTP 错误转换为带上下文的 ProviderError。"""
+        if response.status_code < 400:
+            return
+        body = response.text
+        body_lower = body.lower()
+        if response.status_code in {400, 401, 403} and (
+            "authorization header" in body_lower
+            or "authorization" in body_lower
+            or "api key" in body_lower
+            or "unauthorized" in body_lower
+        ):
+            raise ProviderError(
+                f"{self.provider_name} 鉴权失败（HTTP {response.status_code}）："
+                "服务端没有收到有效的 Authorization 头。"
+                "请检查 API Key 是否已填写，或设置对应环境变量"
+                "（自定义 Provider 使用 MINI_HARNESS_API_KEY）；"
+                "如果端点无需鉴权，可留空。\n"
+                f"服务端响应：{body[:300]}"
+            )
+        raise ProviderError(self._format_http_error(response))
+
+    @staticmethod
+    def _build_tool_calls(
+        buffers: dict[int, dict[str, str]],
+    ) -> list[ToolCallRequest]:
+        """把流式分片的 tool_calls 缓冲转换为 ToolCallRequest。"""
+        tool_calls: list[ToolCallRequest] = []
+        for index in sorted(buffers):
+            buffer = buffers[index]
+            tool_calls.append(
+                ToolCallRequest(
+                    id=buffer.get("id") or f"call_{index}",
+                    name=buffer.get("name", ""),
+                    arguments=_parse_tool_arguments(buffer.get("arguments", "")),
+                )
+            )
+        return tool_calls
+
     async def chat(
         self,
         messages: list[Message],
@@ -203,17 +266,7 @@ class OpenAICompatibleProvider(LLMProvider):
             AgentRunner._run_core await 本方法；出错时抛出 ProviderError，
             由交互式 CLI 或上层调用方捕获。
         """
-        payload: dict[str, Any] = {
-            "model": self.model,
-            "messages": [self._to_openai_message(message) for message in messages],
-        }
-        if self._uses_reasoning_parameters():
-            payload["max_completion_tokens"] = self.max_tokens
-        else:
-            payload["temperature"] = self.temperature
-            payload["max_tokens"] = self.max_tokens
-        if tools:
-            payload["tools"] = tools
+        payload = self._build_payload(messages, tools)
 
         try:
             async with httpx.AsyncClient(
@@ -235,24 +288,7 @@ class OpenAICompatibleProvider(LLMProvider):
                 f"{self.provider_name} 网络请求失败：{exc}"
             ) from exc
 
-        if response.status_code >= 400:
-            body = response.text
-            body_lower = body.lower()
-            if response.status_code in {400, 401, 403} and (
-                "authorization header" in body_lower
-                or "authorization" in body_lower
-                or "api key" in body_lower
-                or "unauthorized" in body_lower
-            ):
-                raise ProviderError(
-                    f"{self.provider_name} 鉴权失败（HTTP {response.status_code}）："
-                    "服务端没有收到有效的 Authorization 头。"
-                    "请检查 API Key 是否已填写，或设置对应环境变量"
-                    "（自定义 Provider 使用 MINI_HARNESS_API_KEY）；"
-                    "如果端点无需鉴权，可留空。\n"
-                    f"服务端响应：{body[:300]}"
-                )
-            raise ProviderError(self._format_http_error(response))
+        self._raise_for_status(response)
 
         try:
             data = response.json()
@@ -288,6 +324,117 @@ class OpenAICompatibleProvider(LLMProvider):
             content=_normalize_content(message.get("content")),
             tool_calls=tool_calls,
             finish_reason=str(choice.get("finish_reason") or "stop"),
+        )
+
+    async def chat_stream(
+        self,
+        messages: list[Message],
+        tools: list[ToolDefinition] | None = None,
+        on_text_delta: TextDeltaCallback | None = None,
+    ) -> LLMResponse:
+        """通过 SSE 流式读取 OpenAI-compatible 响应。
+
+        文本 delta 会实时回调；工具调用的 JSON 参数按 ``index`` 聚合，
+        流结束后转换为完整的 ``LLMResponse``，保持 AgentRunner 的消息
+        与工具执行逻辑不变。
+        """
+        if on_text_delta is None:
+            return await self.chat(messages=messages, tools=tools)
+
+        payload = self._build_payload(messages, tools, stream=True)
+        content_parts: list[str] = []
+        tool_buffers: dict[int, dict[str, str]] = {}
+        finish_reason = "stop"
+
+        try:
+            async with httpx.AsyncClient(
+                timeout=self.timeout,
+                transport=self.transport,
+            ) as client:
+                async with client.stream(
+                    "POST",
+                    self.chat_url,
+                    headers=self._headers(),
+                    json=payload,
+                ) as response:
+                    if response.status_code >= 400:
+                        await response.aread()
+                        self._raise_for_status(response)
+
+                    async for line in response.aiter_lines():
+                        if not line or line.startswith(":"):
+                            continue
+                        if not line.startswith("data:"):
+                            continue
+                        data = line[len("data:") :].strip()
+                        if data == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(data)
+                        except json.JSONDecodeError:
+                            # SSE 可能夹杂注释或厂商扩展事件，跳过即可。
+                            continue
+                        choices = (
+                            chunk.get("choices")
+                            if isinstance(chunk, dict)
+                            else None
+                        )
+                        if not isinstance(choices, list) or not choices:
+                            continue
+                        choice = choices[0] if isinstance(choices[0], dict) else {}
+                        finish_reason = str(
+                            choice.get("finish_reason") or finish_reason
+                        )
+                        delta = choice.get("delta")
+                        if not isinstance(delta, dict):
+                            continue
+
+                        text = _normalize_content(delta.get("content"))
+                        if text:
+                            content_parts.append(text)
+                            on_text_delta(text)
+
+                        for raw_call in delta.get("tool_calls") or []:
+                            if not isinstance(raw_call, dict):
+                                continue
+                            try:
+                                index = int(raw_call.get("index", 0))
+                            except (TypeError, ValueError):
+                                index = 0
+                            buffer = tool_buffers.setdefault(
+                                index,
+                                {"id": "", "name": "", "arguments": ""},
+                            )
+                            call_id = raw_call.get("id")
+                            if call_id:
+                                buffer["id"] += str(call_id)
+                            function = raw_call.get("function")
+                            if not isinstance(function, dict):
+                                continue
+                            name = function.get("name")
+                            if name:
+                                buffer["name"] += str(name)
+                            arguments = function.get("arguments")
+                            if isinstance(arguments, str):
+                                buffer["arguments"] += arguments
+                            elif arguments is not None:
+                                buffer["arguments"] += json.dumps(
+                                    arguments, ensure_ascii=False
+                                )
+        except ImportError as exc:
+            raise ProviderError(
+                "无法初始化 HTTP 客户端，可能是 SOCKS 代理依赖缺失。"
+                "请运行 `uv sync`，或安装 `httpx[socks]` 后重试。"
+            ) from exc
+        except httpx.RequestError as exc:
+            raise ProviderError(
+                f"{self.provider_name} 网络请求失败：{exc}"
+            ) from exc
+
+        return LLMResponse(
+            content="".join(content_parts) or None,
+            tool_calls=self._build_tool_calls(tool_buffers),
+            finish_reason=finish_reason,
         )
 
     def _format_http_error(self, response: httpx.Response) -> str:
