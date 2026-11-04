@@ -148,10 +148,13 @@ def create_provider(config: ProviderConfig) -> LLMProvider:
             base_url=base_url,
             model=model,
             temperature=config.temperature,
-            max_tokens=config.max_tokens,
+            max_tokens=config.max_output_tokens or config.max_tokens,
             timeout=config.timeout,
             extra_headers=extra_headers,
             provider_name=preset.display_name,
+            context_window_tokens=config.context_window_tokens,
+            thinking=config.thinking,
+            reasoning_effort=config.reasoning_effort,
         )
 
     return OpenAICompatibleProvider(
@@ -159,8 +162,11 @@ def create_provider(config: ProviderConfig) -> LLMProvider:
         base_url=base_url,
         model=model,
         temperature=config.temperature,
-        max_tokens=config.max_tokens,
+        max_tokens=config.max_output_tokens or config.max_tokens,
         timeout=config.timeout,
         extra_headers=extra_headers,
         provider_name=preset.display_name,
+        context_window_tokens=config.context_window_tokens,
+        thinking=config.thinking,
+        reasoning_effort=config.reasoning_effort,
     )

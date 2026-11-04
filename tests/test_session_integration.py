@@ -399,8 +399,10 @@ async def test_max_iterations_finalized_turn_is_saved(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_incomplete_turn_is_not_saved_to_session(tmp_path: Path) -> None:
-    """预算耗尽且收尾失败时，不把失败回合写进 Session。"""
+async def test_incomplete_turn_with_tools_is_saved_to_session(
+    tmp_path: Path,
+) -> None:
+    """失败但已执行工具时，必须保存执行记录而不是丢弃整轮。"""
     manager = SessionManager(make_workspace(tmp_path), data_root=tmp_path / "data")
     provider = MockProvider(
         [
@@ -434,9 +436,15 @@ async def test_incomplete_turn_is_not_saved_to_session(tmp_path: Path) -> None:
         agent_loop.stop()
         await task
 
-    assert outbound.metadata["error"] == "agent_incomplete"
-    assert "本轮未完成，未保存到 Session。" in outbound.content
-    assert manager.load().messages == []
+    assert outbound.metadata["error"] == "context_budget_exceeded"
+    assert "已执行的工具记录已保存" in outbound.content
+    messages = manager.load().messages
+    assert messages[0] == {"role": "user", "content": "分析失败任务"}
+    assert any(
+        message.get("role") == "assistant" and message.get("tool_calls")
+        for message in messages
+    )
+    assert any(message.get("role") == "tool" for message in messages)
 
 
 @pytest.mark.asyncio
@@ -465,7 +473,7 @@ async def test_cli_history_clear_and_restart(tmp_path: Path) -> None:
     await cli.run()
 
     text = "\n".join(console.output)
-    assert "Mini Harness V1" in text
+    assert "Mini Harness V2" in text
     assert f"Workspace: {workspace.resolve()}" in text
     assert "Session: cli:main" in text
     assert "History: 0 messages" in text

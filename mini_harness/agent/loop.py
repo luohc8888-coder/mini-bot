@@ -8,6 +8,7 @@ OutboundMessage。
 from __future__ import annotations
 
 import asyncio
+import logging
 from copy import deepcopy
 from typing import Any
 
@@ -15,10 +16,16 @@ from mini_harness.bus.events import InboundMessage, OutboundMessage
 from mini_harness.bus.queue import MessageBus
 from mini_harness.providers import ProviderError
 from mini_harness.providers.base import TextDeltaCallback, ToolStartCallback
-from mini_harness.session import SessionError, SessionManager
+from mini_harness.session import Session, SessionError, SessionManager
 
-from .prompt import build_system_prompt
+from .context import (
+    ContextBudgetExceeded,
+    ContextBuilder,
+    ContextConfig,
+)
 from .runner import AgentRunSpec, AgentRunner
+
+logger = logging.getLogger(__name__)
 
 
 class AgentLoop:
@@ -32,6 +39,11 @@ class AgentLoop:
             实现可正常退出的常驻循环，不引入 Session 队列或后台任务。
         on_text_delta: 可选的流式文本回调；CLI 用它实时渲染 Token。
         on_tool_start: 可选的工具开始回调；CLI 用来在流式文本之间穿插工具提示。
+        context_builder: 可选的 ContextBuilder。传入时直接使用；不传且启用
+            Session 时，Loop 会基于 ``session_manager.workspace`` 和
+            ``runner.tools.get_definitions()`` 自动创建一个。
+        context_config: 自动创建 ContextBuilder 时使用的预算配置；默认
+            ``ContextConfig()``。
 
     上下游:
         main.py 创建并 ``asyncio.create_task(agent_loop.run())``；CLI 通过
@@ -49,6 +61,8 @@ class AgentLoop:
         max_iterations: int = 32,
         poll_interval: float = 0.1,
         session_manager: SessionManager | None = None,
+        context_builder: ContextBuilder | None = None,
+        context_config: ContextConfig | None = None,
         on_text_delta: TextDeltaCallback | None = None,
         on_tool_start: ToolStartCallback | None = None,
     ) -> None:
@@ -58,6 +72,21 @@ class AgentLoop:
         self._max_iterations = max_iterations
         self._poll_interval = poll_interval
         self._session_manager = session_manager
+        self._context_builder = context_builder
+        self._context_config = context_config
+        if self._context_builder is None and session_manager is not None:
+            # V2 只在 Session 模式构建上下文；V0 的 demo 路径继续保持
+            # “单条 user 消息直接交给 Runner”的兼容行为。
+            effective_context_config = context_config
+            if effective_context_config is None:
+                effective_context_config = ContextConfig.from_provider(
+                    runner.provider
+                )
+            self._context_builder = ContextBuilder(
+                session_manager.workspace,
+                effective_context_config,
+                tool_definitions=runner.tools.get_definitions(),
+            )
         self._on_text_delta = on_text_delta
         self._on_tool_start = on_tool_start
         self._running = False
@@ -75,6 +104,11 @@ class AgentLoop:
     def session_manager(self) -> SessionManager | None:
         """返回注入的 SessionManager；V0 模式下为 None。"""
         return self._session_manager
+
+    @property
+    def context_builder(self) -> ContextBuilder | None:
+        """返回当前使用的 ContextBuilder；V0 模式下为 None。"""
+        return self._context_builder
 
     async def run(self) -> None:
         """启动单消费者循环，直到调用 ``stop()``。
@@ -172,6 +206,7 @@ class AgentLoop:
             max_iterations=self._max_iterations,
             on_text_delta=self._on_text_delta,
             on_tool_start=self._on_tool_start,
+            context_config=self._context_config,
         )
         result = await self.runner.run(spec)
         return self._result_to_outbound(message, result)
@@ -180,7 +215,15 @@ class AgentLoop:
         self,
         message: InboundMessage,
     ) -> OutboundMessage:
-        """加载历史、运行 Runner、保存完整历史，再返回本轮结果。"""
+        """加载历史、用 ContextBuilder 构建请求、运行 Runner、保存新增消息。
+
+        V2 的关键边界：
+
+        - ContextBuilder 只生成临时 ``request_messages``（含 System Prompt
+          与裁剪后的历史）；
+        - Session 只追加“当前用户消息 + 本轮新增 assistant/tool 消息”；
+        - 绝不把 ``request_messages`` 或 ``result.messages`` 整体写回 Session。
+        """
         manager = self._session_manager
         assert manager is not None
         try:
@@ -199,20 +242,56 @@ class AgentLoop:
             )
 
         history = deepcopy(session.messages)
-        input_messages = [
-            *history,
-            {"role": "user", "content": message.content},
-        ]
+        current_message = {"role": "user", "content": message.content}
+        builder = self._context_builder
+        if builder is None:
+            return self._error_outbound(
+                message,
+                "上下文构建失败：ContextBuilder 未初始化。",
+                error="context_error",
+            )
+
+        try:
+            built = builder.build_context(history, current_message)
+        except ContextBudgetExceeded as exc:
+            # 超预算不截断当前输入、不清空历史、不调用 Provider。
+            return self._error_outbound(
+                message,
+                f"上下文预算不足，本轮未发送给模型。{exc}",
+                error="context_budget_exceeded",
+            )
+        except Exception as exc:  # noqa: BLE001 - 上下文构建失败必须报告
+            return self._error_outbound(
+                message,
+                f"上下文构建失败：{type(exc).__name__}: {exc}",
+                error="context_error",
+            )
+
+        request_messages = built.messages
         try:
             result = await self.runner.run(
                 AgentRunSpec(
-                    initial_messages=input_messages,
+                    initial_messages=request_messages,
                     max_iterations=self._max_iterations,
-                    system_prompt=build_system_prompt(manager.workspace),
                     finalize_on_max_iterations=True,
                     on_text_delta=self._on_text_delta,
                     on_tool_start=self._on_tool_start,
+                    # 与 ContextBuilder 使用同一份预算配置：Runner 在每次
+                    # Provider 请求前会再次检查并执行 Compact / 截断。
+                    context_config=builder.config,
+                    request_recorder=builder.record_provider_request,
                 )
+            )
+        except ContextBudgetExceeded as exc:
+            # 工具循环中 Compact 后仍无法压进输入预算：后续请求不会发送，
+            # 但此前已经执行的工具副作用必须 append-only 落盘，不能让
+            # Session 与文件系统事实脱节。
+            self._persist_partial_failure(manager, current_message, exc)
+            return self._error_outbound(
+                message,
+                f"上下文预算不足，本轮已停止后续模型请求；"
+                f"此前已执行的工具记录已保存。{exc}",
+                error="context_budget_exceeded",
             )
         except ProviderError as exc:
             return self._error_outbound(
@@ -227,31 +306,73 @@ class AgentLoop:
                 error="agent_error",
             )
 
-        # 未完成/未收尾的回合不能污染 Session。只有正常完成，或预算耗尽
-        # 后成功执行 finalize_on_max_iterations 的回合才允许持久化。
+        # 未完成/未收尾的回合：若已经执行过工具，必须保留执行 checkpoint，
+        # 否则文件副作用与 Session 记录会永久分叉。没有工具副作用的纯失败
+        # 回合仍保持不写 Session。
         if result.stop_reason not in {"completed", "max_iterations_finalized"}:
+            new_messages = getattr(result, "new_messages", None)
+            if (
+                isinstance(new_messages, list)
+                and new_messages
+                and result.tools_used
+            ):
+                self._persist_result_failure(
+                    manager, current_message, new_messages
+                )
+                outbound = self._error_outbound(
+                    message,
+                    "本轮工具执行预算已用完，未能生成最终回答；"
+                    "此前已执行的工具记录已保存。",
+                    error="context_budget_exceeded",
+                )
+                outbound.metadata["stop_reason"] = result.stop_reason
+                outbound.metadata["tools_used"] = list(result.tools_used)
+                return outbound
             return self._error_outbound(
                 message,
                 "本轮未完成，未保存到 Session。可以缩小任务范围后重试。",
                 error="agent_incomplete",
             )
 
-        # Runner 的约定是返回“输入消息 + 本轮新增消息”的完整列表。不能
-        # 用 result.messages[len(history):] 直接切片，因为未来 ContextBuilder
-        # 可能改变输入和输出的边界；这里先验证严格前缀关系。
+        # 使用 AgentRunResult 的显式边界校验，不依赖 len(history) 等不稳定
+        # 假设。Runner 返回 messages = 输入 request_messages + new_messages。
+        input_count = getattr(result, "input_message_count", None)
+        new_messages = getattr(result, "new_messages", None)
         if (
             not isinstance(result.messages, list)
-            or len(result.messages) < len(input_messages)
-            or result.messages[: len(input_messages)] != input_messages
+            or not isinstance(input_count, int)
+            or input_count != len(request_messages)
+            or not isinstance(new_messages, list)
+            or len(result.messages) != input_count + len(new_messages)
+            or result.messages[:input_count] != request_messages
+            or result.messages[input_count:] != new_messages
         ):
             return self._error_outbound(
                 message,
                 "Session 历史更新失败：Runner 返回的消息历史不是输入历史的"
-                "完整前缀，已拒绝保存。",
+                "完整前缀，或新增消息边界不一致，已拒绝保存。",
                 error="session_history_error",
             )
 
-        session.messages = deepcopy(result.messages)
+        # System Prompt 永远属于临时请求上下文；新消息中出现 system 说明
+        # Runner 边界被破坏，宁可拒绝保存也不让提示词污染 Session。
+        if any(
+            not isinstance(item, dict) or item.get("role") == "system"
+            for item in new_messages
+        ):
+            return self._error_outbound(
+                message,
+                "Session 历史更新失败：本轮新增消息包含 system 消息，"
+                "已拒绝保存。",
+                error="session_history_error",
+            )
+
+        # 完整旧历史 + 当前用户消息（只保存一次）+ 本轮新增执行消息。
+        session.messages = [
+            *deepcopy(history),
+            deepcopy(current_message),
+            *deepcopy(new_messages),
+        ]
         try:
             manager.save(session)
         except SessionError as exc:
@@ -274,6 +395,58 @@ class AgentLoop:
             result,
             history_count=len(session.messages),
         )
+
+    def _persist_partial_failure(
+        self,
+        manager: Any,
+        current_message: dict[str, Any],
+        exc: ContextBudgetExceeded,
+    ) -> None:
+        """把预算失败前已执行的工具消息追加到 Session。
+
+        只写 ``current user + Runner.new_messages``，绝不写本次请求拼接的
+        System Prompt 或裁剪后的历史。没有新增消息时保持 Session 不变，
+        与“首次请求就未发送”的既有语义一致。
+        """
+        partial_new = getattr(exc, "partial_new_messages", None)
+        if not isinstance(partial_new, list) or not partial_new:
+            return
+        try:
+            session = manager.load()
+            manager.save(
+                Session(
+                    key=session.key,
+                    messages=[
+                        *deepcopy(session.messages),
+                        deepcopy(current_message),
+                        *deepcopy(partial_new),
+                    ],
+                )
+            )
+        except Exception:  # noqa: BLE001 - 保存失败不能掩盖原始预算错误
+            logger.exception("预算失败后保存已执行工具记录失败")
+
+    def _persist_result_failure(
+        self,
+        manager: Any,
+        current_message: dict[str, Any],
+        new_messages: list[dict[str, Any]],
+    ) -> None:
+        """失败但已有工具副作用时，把当前 user 与本轮新增消息落盘。"""
+        try:
+            session = manager.load()
+            manager.save(
+                Session(
+                    key=session.key,
+                    messages=[
+                        *deepcopy(session.messages),
+                        deepcopy(current_message),
+                        *deepcopy(new_messages),
+                    ],
+                )
+            )
+        except Exception:  # noqa: BLE001 - 保存失败不能掩盖原始失败
+            logger.exception("失败回合保存已执行工具记录失败")
 
     def _result_to_outbound(
         self,

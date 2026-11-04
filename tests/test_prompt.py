@@ -15,9 +15,15 @@ def test_system_prompt_contains_workspace_and_project_analysis_rules() -> None:
 
     assert str(workspace) in prompt
     assert "list_dir" in prompt
+    assert "find_files" in prompt
     assert "grep" in prompt
     assert "write_file" in prompt
+    assert "edit_file" in prompt
+    assert "apply_patch" in prompt
     assert "3~8 个关键文件" in prompt
+    assert "只有用户要求保存报告" in prompt
+    assert "run_command" in prompt
+    assert "历史摘要中的 truncated" in prompt
 
 
 def test_system_prompt_defaults_to_current_directory_label() -> None:

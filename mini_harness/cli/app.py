@@ -1,7 +1,7 @@
 """Mini Harness 交互式 CLI。
 
 优先复用默认配置启动；没有默认配置时选择 Provider / 模型 / API Key。支持
-保存默认配置、运行中通过 ``/model`` 切换 Provider/模型，以及 V1 的
+保存默认配置、通过 ``/model`` 切换 Provider/模型、``/settings`` 配置推理强度，以及 V1 的
 Workspace 固定、Session 历史恢复、``/history`` 和 ``/clear``。
 """
 
@@ -9,13 +9,22 @@ from __future__ import annotations
 
 import asyncio
 import getpass
+import json
 import os
+import re
 import sys
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from mini_harness.agent import AgentLoop, AgentRunner, AgentRunSpec
+from mini_harness.agent import (
+    AgentLoop,
+    AgentRunner,
+    AgentRunSpec,
+    ContextBuilder,
+    ContextBudgetExceeded,
+    ContextConfig,
+)
 from mini_harness.bus import InboundMessage, MessageBus, OutboundMessage
 from mini_harness.providers import (
     LLMProvider,
@@ -27,7 +36,11 @@ from mini_harness.providers import (
     get_preset,
     grouped_presets,
 )
-from mini_harness.providers.base import Message, TextDeltaCallback
+from mini_harness.providers.base import (
+    Message,
+    TextDeltaCallback,
+    ToolStartCallback,
+)
 from mini_harness.session import (
     SessionError,
     SessionManager,
@@ -35,9 +48,14 @@ from mini_harness.session import (
 )
 from mini_harness.tools import (
     AddTool,
+    ApplyPatchTool,
+    EditFileTool,
+    FileInfoTool,
+    FindFilesTool,
     GrepTool,
     ListDirTool,
     ReadFileTool,
+    RunCommandTool,
     ToolRegistry,
     WriteFileTool,
 )
@@ -51,6 +69,7 @@ class Selection:
 
     config: ProviderConfig
     preset: ProviderPreset
+    profile_name: str | None = None
 
 
 class _AbortSelection(Exception):
@@ -225,6 +244,14 @@ class InteractiveCLI:
         data_root: Path | None = None,
         session_manager: SessionManager | None = None,
         stream: bool = False,
+        context_config: ContextConfig | None = None,
+        turn_timeout: float | None = None,
+        max_output_tokens: int = 0,
+        context_window_tokens: int = 0,
+        thinking: bool = False,
+        reasoning_effort: str = "",
+        max_context_tokens: int = 0,
+        reserve_output_tokens: int = 0,
     ) -> None:
         """初始化 CLI 依赖。
 
@@ -235,11 +262,28 @@ class InteractiveCLI:
             session_manager: 可注入的已有 SessionManager，优先于 workspace。
             stream: 是否启用流式输出；``run_interactive_cli`` 默认开启，
                 直接实例化时默认关闭以保持旧行为。
+            context_config: V2 上下文预算配置；默认 ``ContextConfig()``。
+            turn_timeout: 可选整轮等待秒数；None 表示不设固定整轮超时，
+                避免长生成已经成功保存却被 UI 误报 timeout。
         """
         self.console = console or Console()
         self.store = profile_store or ProfileStore()
         self.max_iterations = max_iterations
         self.stream = stream
+        self.context_config = context_config or ContextConfig()
+        self._base_context_config = self.context_config
+        self._context_config_override = context_config
+        self._max_context_tokens_override = max_context_tokens or (
+            context_config.max_context_tokens if context_config else 0
+        )
+        self._reserve_output_tokens_override = reserve_output_tokens or (
+            context_config.reserve_output_tokens if context_config else 0
+        )
+        self.turn_timeout = turn_timeout
+        self.max_output_tokens = max_output_tokens
+        self.context_window_tokens = context_window_tokens
+        self.thinking = thinking
+        self.reasoning_effort = reasoning_effort
         self.tools = ToolRegistry()
         self.tools.register(AddTool())
 
@@ -259,10 +303,36 @@ class InteractiveCLI:
         # 文件工具必须绑定固定的 Workspace，不能读取进程 cwd。
         if self.workspace is not None:
             file_workspace = WorkspaceResolver().resolve(self.workspace)
+            self.tools.register(FindFilesTool(file_workspace))
             self.tools.register(GrepTool(file_workspace))
             self.tools.register(ListDirTool(file_workspace))
             self.tools.register(ReadFileTool(file_workspace))
             self.tools.register(WriteFileTool(file_workspace))
+            self.tools.register(EditFileTool(file_workspace))
+            self.tools.register(ApplyPatchTool(file_workspace))
+            self.tools.register(FileInfoTool(file_workspace))
+            self.tools.register(RunCommandTool(file_workspace, confirm=self._confirm_command))
+
+        # V2：CLI 与 AgentLoop 共享同一个 ContextBuilder；Tool Schema 开销
+        # 按当前注册表估算，文件工具必须已在上方注册完成。
+        self.context_builder: ContextBuilder | None = (
+            ContextBuilder(
+                self.workspace,
+                self.context_config,
+                tool_definitions=self.tools.get_definitions(),
+            )
+            if self.workspace is not None
+            else None
+        )
+
+    async def _confirm_command(self, command: str, cwd: str) -> bool:
+        """宿主侧确认，批准值不来自模型提供的工具参数。"""
+        self.console.write(f"命令需要确认（cwd: {cwd}）：\n{command}")
+        try:
+            answer = await self.console.read("允许执行？输入 yes 确认，其他输入拒绝：")
+        except EOFError:
+            return False
+        return answer.strip().lower() == "yes"
 
     async def run(self) -> None:
         """运行配置选择与聊天主循环。"""
@@ -309,17 +379,25 @@ class InteractiveCLI:
             self.console.write_error(str(exc))
 
     def _show_banner(self) -> None:
-        """显示 V1 启动摘要或 V0 兼容欢迎信息。"""
+        """显示 V2 启动摘要或 V0 兼容欢迎信息。"""
         self.console.write("")
         if self.session_manager is not None:
             session = self.session_manager.load()
-            self.console.write("Mini Harness V1")
+            self.console.write("Mini Harness V2")
             self.console.write(f"Workspace: {self.workspace}")
             self.console.write(f"Session: {self.session_manager.session_key}")
             self.console.write(f"History: {len(session.messages)} messages")
             self.console.write(f"Loaded messages: {len(session.messages)}")
+            self.console.write(
+                f"Context budget: {self.context_config.available_input_tokens} "
+                f"input tokens (max {self.context_config.max_context_tokens}, "
+                f"reserve {self.context_config.reserve_output_tokens})"
+            )
             self.console.write(f"配置文件：{self.store.path}")
-            self.console.write("输入 /help 查看命令；输入 /exit 退出。")
+            self.console.write(
+                "输入 /help 查看命令；输入 /context 查看上下文预算；"
+                "输入 /exit 退出。"
+            )
             return
 
         self.console.write("=" * 56)
@@ -408,8 +486,19 @@ class InteractiveCLI:
             model=model,
             api_key=api_key,
             base_url=base_url,
+            max_output_tokens=self.max_output_tokens,
+            context_window_tokens=self.context_window_tokens,
+            thinking=self.thinking,
+            reasoning_effort=self.reasoning_effort,
         )
+        if preset.protocol == "openai":
+            effort = await self._choose_reasoning_effort(config)
+            config = replace(
+                config, reasoning_effort=effort,
+                thinking=bool(effort) or (effort == config.reasoning_effort and config.thinking),
+            )
 
+        profile_name = None
         if preset.protocol != "mock":
             save = await self._confirm("保存为默认配置? [Y/n]: ", default=True)
             if save:
@@ -424,6 +513,7 @@ class InteractiveCLI:
                 except OSError as exc:
                     self.console.write(f"配置保存失败，将继续使用当前配置：{exc}")
                 else:
+                    profile_name = profile.name
                     saved_hint = (
                         "（含 API Key）" if profile.api_key else ""
                     )
@@ -431,7 +521,7 @@ class InteractiveCLI:
                         f"已保存默认配置：{profile.name}{saved_hint}"
                     )
 
-        return Selection(config=config, preset=preset)
+        return Selection(config=config, preset=preset, profile_name=profile_name)
 
     async def _config_from_profile(self, profile: ProviderProfile) -> Selection:
         """将保存的 profile 恢复为运行配置。"""
@@ -465,8 +555,118 @@ class InteractiveCLI:
             base_url=base_url,
             temperature=profile.temperature,
             max_tokens=profile.max_tokens,
+            max_output_tokens=profile.max_output_tokens,
+            context_window_tokens=profile.context_window_tokens,
+            thinking=profile.thinking,
+            reasoning_effort=profile.reasoning_effort,
         )
-        return Selection(config=config, preset=preset)
+        return Selection(
+            config=self._apply_runtime_overrides(config),
+            preset=preset,
+            profile_name=profile.name,
+        )
+
+    async def _choose_reasoning_effort(self, config: ProviderConfig) -> str:
+        """选择推理档位；回车保持当前值，0 恢复端点默认。"""
+        model = config.model.lower().rsplit("/", 1)[-1]
+        levels = (
+            ("low", "high", "max")
+            if model.startswith("deepseek-v4.1") or model == "deepseek-flash"
+            else ("low", "medium", "high", "xhigh", "max")
+        )
+        self.console.write(f"\n推理强度设置（{config.model}）")
+        self.console.write(f"当前：{config.reasoning_effort or '端点默认'}")
+        self.console.write("  0. 端点默认")
+        for index, level in enumerate(levels, start=1):
+            self.console.write(f"  {index}. {level}")
+        self.console.write("  c. 自定义档位（按模型端点支持的值填写）")
+        self.console.write("  q. 取消")
+        while True:
+            answer = (await self.console.read("选择推理强度 [回车保留]: ")).strip().lower()
+            if not answer:
+                return config.reasoning_effort
+            if answer in {"q", "quit"}:
+                raise _AbortSelection
+            if answer in {"0", "default"}:
+                return ""
+            if answer in levels:
+                return answer
+            if answer.isdigit() and 1 <= int(answer) <= len(levels):
+                return levels[int(answer) - 1]
+            if answer == "c":
+                custom = (await self.console.read("自定义推理档位: ")).strip()
+                if custom.lower() in {"q", "quit"}:
+                    raise _AbortSelection
+                if re.fullmatch(r"[A-Za-z0-9_-]+", custom):
+                    return custom
+            self.console.write("请选择有效序号或档位名称。")
+
+    async def _edit_reasoning_settings(
+        self, selection: Selection
+    ) -> tuple[LLMProvider, Selection] | None:
+        """保存当前 profile 的推理设置，重建 Provider 后立即生效。"""
+        if (selection.config.protocol or selection.preset.protocol) != "openai":
+            self.console.write("当前 Provider 适配器不支持推理强度设置。")
+            return None
+        try:
+            effort = await self._choose_reasoning_effort(selection.config)
+        except (_AbortSelection, EOFError):
+            self.console.write("已取消推理设置。")
+            return None
+        config = replace(
+            selection.config, reasoning_effort=effort,
+            thinking=bool(effort) or (
+                effort == selection.config.reasoning_effort and selection.config.thinking
+            ),
+        )
+        try:
+            provider = create_provider(config)
+        except ProviderConfigurationError as exc:
+            self.console.write_error(f"配置错误：{exc}")
+            return None
+        profile = next(
+            (p for p in self.store.load() if p.name == selection.profile_name), None
+        )
+        if profile is not None:
+            try:
+                self.store.upsert(replace(profile, reasoning_effort=effort, thinking=config.thinking))
+            except OSError as exc:
+                self.console.write_error(f"推理设置保存失败，仅本次连接生效：{exc}")
+            else:
+                self.console.write(f"已保存推理设置：{profile.name}")
+        else:
+            self.console.write("推理设置已应用到本次连接（当前配置未保存）。")
+        updated = replace(selection, config=config)
+        self._activate_selection(updated)
+        return provider, updated
+
+    def _apply_runtime_overrides(self, config: ProviderConfig) -> ProviderConfig:
+        """命令行能力选项也覆盖已保存配置，不能只在创建 profile 时生效。"""
+        return replace(
+            config,
+            context_window_tokens=self.context_window_tokens or config.context_window_tokens,
+            max_output_tokens=self.max_output_tokens or config.max_output_tokens,
+            thinking=self.thinking or config.thinking,
+            reasoning_effort=self.reasoning_effort or config.reasoning_effort,
+        )
+
+    def _activate_selection(self, selection: Selection) -> None:
+        """连接/切换模型后立即同步预算，首次 /context 也显示真实配置。"""
+        self.context_config = self._effective_context_config(selection)
+        if self.context_builder is not None:
+            self.context_builder.config = self.context_config
+        self.console.write(
+            f"模型预算：上下文 {self.context_config.max_context_tokens} tokens，"
+            f"输入预算 {self.context_config.available_input_tokens}，"
+            f"最大输出 {selection.config.max_output_tokens or selection.config.max_tokens}；"
+            f"思考={'请求开启' if selection.config.thinking else '端点默认'}，"
+            f"推理档位={selection.config.reasoning_effort or '端点默认'}"
+        )
+        if not selection.config.context_window_tokens and not self._max_context_tokens_override:
+            self.console.write(
+                "模型上下文能力未配置，当前使用 8K 回退值；"
+                "可用 --context-window-tokens 指定端点支持的上限。"
+            )
 
     async def _choose_preset(self) -> ProviderPreset:
         """展示分组 Provider 菜单并返回选择。"""
@@ -604,7 +804,8 @@ class InteractiveCLI:
             f"已连接：{selection.preset.display_name} / {selection.config.model}"
         )
         self.console.write(
-            "命令：/model 切换厂商或模型  /history 查看历史  "
+            "命令：/model 切换厂商或模型  /settings 推理设置  /history 查看历史  "
+            "/context 查看上下文  /last-prompt 查看上次请求  "
             "/clear 清空 Session  /tools 查看工具  /help 帮助  /exit 退出"
         )
 
@@ -624,12 +825,26 @@ class InteractiveCLI:
             if command == "/help":
                 self.console.write(
                     "/model 或 /config 切换 Provider/模型（Session 历史保留）；"
-                    "/history 查看当前 Session；/clear 清空当前 Session；"
-                    "/tools 查看已注册工具；/exit 退出。"
+                    "/settings 设置并保存当前模型的推理强度；"
+                    "/history 查看当前 Session；/context 查看模型上下文与预算；"
+                    "/last-prompt 查看上一次发给模型的完整请求消息；"
+                    "/clear 清空当前 Session；/tools 查看已注册工具；"
+                    "/exit 退出。"
                 )
+                continue
+            if command == "/settings":
+                updated = await self._edit_reasoning_settings(selection)
+                if updated is not None:
+                    provider, selection = updated
                 continue
             if command == "/history":
                 self._print_history()
+                continue
+            if command == "/context":
+                self._print_context()
+                continue
+            if command in {"/last-prompt", "/last"}:
+                self._print_last_prompt()
                 continue
             if command == "/clear":
                 try:
@@ -637,6 +852,10 @@ class InteractiveCLI:
                 except SessionError as exc:
                     self.console.write_error(f"清空 Session 失败：{exc}")
                 else:
+                    if self.context_builder is not None:
+                        self.context_builder.last_request_messages = None
+                        self.context_builder.last_tool_definitions = None
+                        self.context_builder.last_provider_request = None
                     self.console.write("已清空当前 Session 历史。")
                 continue
             if command in {"/config", "/model"}:
@@ -658,6 +877,7 @@ class InteractiveCLI:
                     continue
                 provider = new_provider
                 selection = new_selection
+                self._activate_selection(selection)
                 self.console.write(
                     f"已切换：{selection.preset.display_name} / "
                     f"{selection.config.model}"
@@ -707,13 +927,41 @@ class InteractiveCLI:
             if not outbound.metadata.get("streamed"):
                 self.console.write_assistant(answer)
 
+    def _effective_context_config(self, selection: Selection) -> ContextConfig:
+        """按当前 profile 的模型能力解析本轮上下文预算。"""
+        config = selection.config
+        context_window = (
+            self._max_context_tokens_override or config.context_window_tokens
+        )
+        max_output = config.max_output_tokens or config.max_tokens
+        base = getattr(self, "_base_context_config", self.context_config)
+        if context_window <= 0:
+            return replace(
+                base,
+                reserve_output_tokens=self._reserve_output_tokens_override or base.reserve_output_tokens,
+            )
+        if max_output <= 0 or max_output >= context_window:
+            max_output = min(4096, max(1, context_window // 4))
+        return ContextConfig(
+            max_context_tokens=context_window,
+            # 能力上限不等于每轮固定预留：实际输出由 Governor 按剩余
+            # 窗口动态分配，否则 384K 最大输出会白白吃掉 384K 输入空间。
+            reserve_output_tokens=self._reserve_output_tokens_override or min(max_output, 4096),
+            include_agents_md=base.include_agents_md,
+            agents_md_max_bytes=base.agents_md_max_bytes,
+            safety_margin_tokens=base.safety_margin_tokens,
+            compact_soft_ratio=base.compact_soft_ratio,
+            max_tool_result_tokens=base.max_tool_result_tokens,
+            enable_auto_compact=base.enable_auto_compact,
+        )
+
     async def _run_session_turn(
         self,
         provider: LLMProvider,
         selection: Selection,
         user_text: str,
         on_text_delta: TextDeltaCallback | None = None,
-        on_tool_start: Callable[[str], None] | None = None,
+        on_tool_start: ToolStartCallback | None = None,
     ) -> OutboundMessage:
         """通过一次独立的 AgentLoop 任务处理一个用户回合。
 
@@ -723,6 +971,7 @@ class InteractiveCLI:
 
         Args:
             on_text_delta: 可选流式回调；由 AgentLoop 透传到 Provider。
+            on_tool_start: 可选工具开始回调；由 AgentLoop 透传到 Runner。
         """
         turn_provider = provider
         if selection.preset.protocol == "mock":
@@ -730,6 +979,14 @@ class InteractiveCLI:
             # MockProvider，模拟真实 Provider 可跨回合复用的行为。
             turn_provider = create_provider(selection.config)
 
+        resolver = getattr(self, "_effective_context_config", None)
+        effective_context = (
+            resolver(selection) if callable(resolver) else self.context_config
+        )
+        self.context_config = effective_context
+        builder = getattr(self, "context_builder", None)
+        if builder is not None:
+            builder.config = effective_context
         bus = MessageBus()
         runner = AgentRunner(provider=turn_provider, tools=self.tools)
         agent_loop = AgentLoop(
@@ -738,23 +995,31 @@ class InteractiveCLI:
             max_iterations=self.max_iterations,
             poll_interval=0.01,
             session_manager=self.session_manager,
+            context_builder=self.context_builder,
+            context_config=self.context_config,
             on_text_delta=on_text_delta,
+            on_tool_start=on_tool_start,
         )
         loop_task = asyncio.create_task(agent_loop.run())
         try:
             await bus.publish_inbound(
                 InboundMessage(content=user_text, sender="cli")
             )
-            try:
-                return await asyncio.wait_for(
-                    bus.consume_outbound(),
-                    timeout=120.0,
-                )
-            except TimeoutError:
-                return OutboundMessage(
-                    content="Agent 响应超时。",
-                    metadata={"error": "timeout", "tools_used": []},
-                )
+            turn_timeout = getattr(self, "turn_timeout", None)
+            if turn_timeout is not None and turn_timeout > 0:
+                try:
+                    return await asyncio.wait_for(
+                        bus.consume_outbound(),
+                        timeout=turn_timeout,
+                    )
+                except TimeoutError:
+                    return OutboundMessage(
+                        content="Agent 响应超时。",
+                        metadata={"error": "timeout", "tools_used": []},
+                    )
+            # 默认不设固定整轮总时限：持续正常的流式生成/工具执行不应
+            # 在 120 秒被误报为失败。需要总时限的调用方显式传 turn_timeout。
+            return await bus.consume_outbound()
         finally:
             agent_loop.stop()
             await loop_task
@@ -783,15 +1048,213 @@ class InteractiveCLI:
                 line += f" [tool_call_id={message['tool_call_id']}]"
             self.console.write(line)
 
+    def _print_context(self) -> None:
+        """显示 ContextBuilder 的真实计算结果。
+
+        该命令只读取 Session 并执行纯内存构建，不会保存 Session、不会触发
+        LLM 调用，也不会打印完整聊天正文或 API Key。统计中的
+        ``估算输入 Token`` 不含当前尚未输入的下一句用户消息。
+        """
+        if self.context_builder is None or self.session_manager is None:
+            self.console.write("当前为 V0 兼容模式，没有 Session 上下文信息。")
+            return
+        try:
+            session = self.session_manager.load()
+        except SessionError as exc:
+            self.console.write_error(f"Session 加载失败：{exc}")
+            return
+        try:
+            stats = self.context_builder.inspect(session.messages)
+        except (ContextBudgetExceeded, ValueError) as exc:
+            self.console.write_error(f"上下文统计失败：{exc}")
+            return
+        except Exception as exc:  # noqa: BLE001 - 调试命令不应让 CLI 崩溃
+            self.console.write_error(
+                f"上下文统计失败：{type(exc).__name__}: {exc}"
+            )
+            return
+
+        self.console.write("")
+        self.console.write("上下文信息")
+        self.console.write(f"工作目录：{stats.workspace}")
+        self.console.write(
+            "系统提示词：已加载"
+            f"（{stats.system_prompt_tokens} 估算 Token）"
+        )
+        self.console.write(
+            f"AGENTS.md：{self._format_agents_md_status(stats)}"
+        )
+        self.console.write(
+            f"工具定义：{stats.tool_schema_tokens} 估算 Token"
+        )
+        self.console.write(
+            f"安全余量：{stats.safety_margin_tokens} 估算 Token"
+        )
+        self.console.write(f"会话消息数：{stats.session_message_count}")
+        self.console.write(
+            "会话角色："
+            f"{self._format_role_counts(stats.session_role_counts)}"
+        )
+        self.console.write(
+            "已选历史消息数："
+            f"{stats.selected_history_messages}"
+        )
+        self.console.write(
+            "已丢弃历史消息数："
+            f"{stats.dropped_history_messages}"
+        )
+        if stats.history_digest_count:
+            self.console.write(
+                f"完成轮次摘要数：{stats.history_digest_count}"
+            )
+        self.console.write(
+            "已选历史角色："
+            f"{self._format_role_counts(stats.selected_history_role_counts)}"
+        )
+        self.console.write(
+            f"估算输入 Token：{stats.estimated_input_tokens}"
+        )
+        self.console.write(
+            f"配置输入预算：{stats.available_input_tokens}"
+        )
+        self.console.write(f"历史预算：{stats.history_budget_tokens}")
+        self.console.write(
+            f"最大上下文 Token：{stats.max_context_tokens}"
+            f"（输出预留：{stats.reserve_output_tokens}）"
+        )
+
+    def _print_last_prompt(self) -> None:
+        """打印当前进程最近一次真正发给 Provider 的请求。
+
+        数据来自 AgentRunner 在 ``provider.chat`` 调用边界记录的快照，
+        因此能反映工具循环中的最后一次请求（iteration、Compact 状态、
+        实际工具消息数），而不是 ContextBuilder 初次构建的版本。快照只
+        保存在内存中，不包含 API Key 或认证 Header。
+        """
+        snapshot = (
+            self.context_builder.last_provider_request
+            if self.context_builder is not None
+            else None
+        )
+        messages = (
+            snapshot.messages
+            if snapshot is not None
+            else (
+                self.context_builder.last_request_messages
+                if self.context_builder is not None
+                else None
+            )
+        )
+        if not messages:
+            self.console.write("当前进程还没有发送过模型请求。")
+            return
+
+        self.console.write("")
+        if snapshot is not None:
+            self.console.write(
+                "最近一次 Provider 请求："
+                f"iteration={snapshot.iteration}，"
+                f"第 {snapshot.call_index} 次请求，"
+                f"估算输入 {snapshot.estimated_tokens}/"
+                f"{snapshot.available_input_tokens} tokens，"
+                f"类型={snapshot.request_kind}，"
+                f"输出上限 {snapshot.max_output_tokens} tokens，"
+                f"accepted 边界 {snapshot.accepted_message_count} 条，"
+                f"Compact={'是' if snapshot.compacted else '否'}，"
+                f"accepted Compact="
+                f"{'是' if snapshot.accepted_compacted else '否'}，"
+                f"工具消息 {snapshot.tool_message_count} 条"
+            )
+            if snapshot.compaction_error:
+                self.console.write(
+                    f"Compact 回退原因：{snapshot.compaction_error}"
+                )
+        self.console.write(
+            f"上一次发给模型的请求消息（{len(messages)} 条）："
+        )
+        for index, message in enumerate(messages, start=1):
+            role = str(message.get("role", "unknown"))
+            self.console.write(f"\n[{index}] {role}")
+            content = message.get("content")
+            if content is None:
+                self.console.write("（无内容）")
+            elif content == "":
+                self.console.write("（空内容）")
+            else:
+                self.console.write(str(content))
+
+            tool_calls = message.get("tool_calls")
+            if tool_calls:
+                self.console.write(
+                    "tool_calls: "
+                    + json.dumps(tool_calls, ensure_ascii=False, indent=2)
+                )
+            if message.get("tool_call_id"):
+                self.console.write(
+                    f"tool_call_id: {message['tool_call_id']}"
+                )
+            if message.get("name"):
+                self.console.write(f"name: {message['name']}")
+
+        tool_definitions = (
+            snapshot.tool_definitions
+            if snapshot is not None
+            else (
+                self.context_builder.last_tool_definitions
+                if self.context_builder is not None
+                else None
+            )
+        )
+        self.console.write("")
+        if tool_definitions:
+            self.console.write(
+                "工具定义（不属于 messages，作为 Provider 的 tools 参数"
+                f"单独发送，共 {len(tool_definitions)} 个）："
+            )
+            self.console.write(
+                json.dumps(tool_definitions, ensure_ascii=False, indent=2)
+            )
+        else:
+            self.console.write("工具定义：无（当前请求没有注册工具）。")
+
+    @staticmethod
+    def _format_agents_md_status(stats: object) -> str:
+        """把 ContextStats 的 AGENTS.md 状态转成 CLI 可读中文文案。"""
+        status = str(getattr(stats, "agents_md_status", "missing"))
+        chars = int(getattr(stats, "agents_md_chars", 0))
+        tokens = int(getattr(stats, "agents_md_tokens", 0))
+        if status == "loaded":
+            return f"已加载（{chars} 字符，{tokens} 估算 Token）"
+        labels = {
+            "missing": "未找到",
+            "empty": "空文件（已忽略）",
+            "disabled": "已禁用",
+            "too_large": "已跳过（超过大小限制）",
+            "decode_error": "已跳过（非 UTF-8）",
+            "read_error": "已跳过（读取失败）",
+            "not_file": "未找到",
+        }
+        return labels.get(status, status)
+
+    @staticmethod
+    def _format_role_counts(counts: dict[str, int]) -> str:
+        """把角色统计格式化为 ``user=1, assistant=2``。"""
+        if not counts:
+            return "（无）"
+        return ", ".join(
+            f"{role}={count}" for role, count in sorted(counts.items())
+        )
+
     async def _chat_loop(
         self,
         provider: LLMProvider,
         selection: Selection,
     ) -> bool:
         """运行多轮聊天；返回 False 表示退出。"""
+        self._activate_selection(selection)
         if self.session_manager is not None:
             return await self._chat_loop_with_session(provider, selection)
-        runner = AgentRunner(provider=provider, tools=self.tools)
+        runner = AgentRunner(provider=provider, tools=self.tools, context_config=self.context_config)
         messages: list[Message] = []
 
         self.console.write("")
@@ -799,7 +1262,7 @@ class InteractiveCLI:
             f"已连接：{selection.preset.display_name} / {selection.config.model}"
         )
         self.console.write(
-            "命令：/model 切换厂商或模型  /clear 清空上下文  "
+            "命令：/model 切换厂商或模型  /settings 推理设置  /clear 清空上下文  "
             "/tools 查看工具  /help 帮助  /exit 退出"
         )
 
@@ -819,8 +1282,15 @@ class InteractiveCLI:
             if command == "/help":
                 self.console.write(
                     "/model 或 /config 切换 Provider/模型（保留当前上下文）；"
+                    "/settings 设置并保存当前模型的推理强度；"
                     "/clear 清空消息历史；/tools 查看已注册工具；/exit 退出。"
                 )
+                continue
+            if command == "/settings":
+                updated = await self._edit_reasoning_settings(selection)
+                if updated is not None:
+                    provider, selection = updated
+                    runner = AgentRunner(provider=provider, tools=self.tools, context_config=self.context_config)
                 continue
             if command == "/clear":
                 messages.clear()
@@ -845,7 +1315,8 @@ class InteractiveCLI:
                     continue
                 provider = new_provider
                 selection = new_selection
-                runner = AgentRunner(provider=provider, tools=self.tools)
+                self._activate_selection(selection)
+                runner = AgentRunner(provider=provider, tools=self.tools, context_config=self.context_config)
                 self.console.write(
                     f"已切换：{selection.preset.display_name} / "
                     f"{selection.config.model}"
@@ -879,6 +1350,7 @@ class InteractiveCLI:
                         initial_messages=turn_messages,
                         max_iterations=self.max_iterations,
                         on_text_delta=renderer.on_delta if renderer else None,
+                        on_tool_start=renderer.on_tool_start if renderer else None,
                     )
                 )
             except ProviderError as exc:
@@ -903,7 +1375,7 @@ class InteractiveCLI:
                 # 某些供应商会返回空 content（例如只返回 reasoning 内容），
                 # 明确提示而不是打印一行只有角色标签的空消息。
                 answer = "（模型返回了空内容）"
-            if result.tools_used:
+            if result.tools_used and not (renderer and renderer.tools_printed):
                 self.console.write_tool(", ".join(result.tools_used))
             if not result.streamed_final:
                 self.console.write_assistant(answer)
@@ -915,18 +1387,36 @@ async def run_interactive_cli(
     data_root: Path | None = None,
     max_iterations: int = 32,
     stream: bool = True,
+    max_context_tokens: int = 0,
+    reserve_output_tokens: int = 0,
+    max_output_tokens: int = 0,
+    context_window_tokens: int = 0,
+    thinking: bool = False,
+    reasoning_effort: str = "",
 ) -> None:
-    """启动 V1 交互式 CLI。
+    """启动 V2 交互式 CLI。
 
     Args:
         workspace: 显式 ``--workspace``；为 None 时使用调用进程的 cwd。
         data_root: Session 数据目录；默认 ``~/.mini-harness``。
         max_iterations: 单次 Agent 运行的最大迭代次数。
         stream: 是否启用流式输出，默认开启；``--no-stream`` 可关闭。
+        max_context_tokens: 显式上下文窗口覆盖；0 表示使用 profile/默认值。
+        reserve_output_tokens: 显式输出预留覆盖；0 表示使用模型配置。
+        max_output_tokens: 本次覆盖模型最大输出额度，新建 profile 时保存。
+        context_window_tokens: 本次覆盖模型上下文窗口，新建 profile 时保存。
+        thinking: 本次显式开启 thinking，新建 profile 时保存。
+        reasoning_effort: 本次覆盖推理档位，新建 profile 时保存。
     """
     await InteractiveCLI(
         workspace=workspace if workspace is not None else Path.cwd(),
         data_root=data_root,
         max_iterations=max_iterations,
         stream=stream,
+        max_context_tokens=max_context_tokens,
+        reserve_output_tokens=reserve_output_tokens,
+        max_output_tokens=max_output_tokens,
+        context_window_tokens=context_window_tokens,
+        thinking=thinking,
+        reasoning_effort=reasoning_effort,
     ).run()

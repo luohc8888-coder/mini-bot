@@ -1,31 +1,39 @@
-"""Agent 的最小 System Prompt 构造器。
+"""兼容 V1 的最小 System Prompt 构造入口。
 
-System Prompt 只在调用 Provider 时临时拼接，不写入 Session；这样每轮都能
-根据当前 Workspace 重新生成，也不会让历史因为重复注入 system message 而膨胀。
+实际模板已经集中到 :mod:`mini_harness.prompts.defaults`。保留本模块是为了
+不破坏 V1 的 ``from mini_harness.agent import build_system_prompt`` 导入
+路径；V2 的正式上下文构建入口是 :class:`mini_harness.agent.context.ContextBuilder`。
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
+from mini_harness.prompts.defaults import (
+    DEFAULT_SYSTEM_PROMPT,
+    build_default_system_prompt,
+)
+
 
 def build_system_prompt(workspace: Path | None = None) -> str:
-    """构造当前 Workspace 的最小系统提示。
+    """构造当前 Workspace 的最小系统提示（V1 兼容函数）。
 
     Args:
         workspace: 当前 Workspace 路径；为 None 时显示 ``"."``。
 
     Returns:
-        供 Provider 使用的 system message 内容。
-    """
-    workspace_text = str(workspace) if workspace is not None else "."
-    return f"""你是运行在本地 Workspace 的编程助手。
-工作目录：{workspace_text}
+        不含 AGENTS.md 的默认 System Prompt。
 
-工具使用规则：
-1. 分析项目时，先用 list_dir 查看目录结构；只有需要了解深层结构时才用 recursive=true。
-2. 优先读取 README、pyproject.toml、入口文件和核心模块，不要为了“完整”而逐个读取所有源码和测试文件。
-3. 需要定位某个类、函数或关键字时，优先使用 grep 搜索，再读取命中的相关文件。
-4. 通常阅读 3~8 个关键文件就足以形成项目总结；信息足够后立即调用 write_file 写报告，不要再继续无目的探索。
-5. 写报告时只依据已经读到的内容，不要编造未读文件的内容。
-"""
+    Notes:
+        V2 的 ``ContextBuilder.build_system_prompt()`` 会在此基础上追加
+        Workspace 根目录的 AGENTS.md。两者共用同一份模板，避免出现两份
+        不一致的默认提示词。
+    """
+    return build_default_system_prompt(workspace)
+
+
+__all__ = [
+    "DEFAULT_SYSTEM_PROMPT",
+    "build_default_system_prompt",
+    "build_system_prompt",
+]

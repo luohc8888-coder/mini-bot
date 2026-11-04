@@ -1,6 +1,6 @@
 [project]
 name = "mini-harness"
-version = "0.2.0"
+version = "0.3.0"
 description = "A minimal, runnable, testable agent harness with real LLM providers and an interactive CLI."
 readme = "README.md"
 requires-python = ">=3.11"

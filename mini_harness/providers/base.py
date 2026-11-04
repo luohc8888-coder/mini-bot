@@ -73,6 +73,8 @@ class LLMResponse:
         content: 文本回答；工具调用轮次可以为 None。
         tool_calls: 本轮请求执行的工具列表；空列表表示最终回答。
         finish_reason: Provider 给出的结束原因，V0 仅作记录。
+        reasoning_content: 需要回放的 Provider 推理/续接内容（如 DeepSeek
+            thinking）；只用于协议续接，不展示给最终用户。
 
     Returns:
         供 AgentRunner 判断是否继续工具循环的响应对象。
@@ -86,6 +88,7 @@ class LLMResponse:
     content: str | None = None
     tool_calls: list[ToolCallRequest] = field(default_factory=list)
     finish_reason: str = "stop"
+    reasoning_content: str | None = None
 
     @property
     def has_tool_calls(self) -> bool:

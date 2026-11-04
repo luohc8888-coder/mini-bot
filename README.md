@@ -3,22 +3,29 @@
 Mini Harness 是一个基于 Python `asyncio` 构建的最小 Agent Harness，用于从零理解真实 Agent Harness 的分层设计：
 
 ```text
-CLI → InboundMessage → MessageBus → AgentLoop → AgentRunner
-    → LLMProvider / ToolRegistry → ToolResult → AgentRunner
-    → AgentRunResult → OutboundMessage → MessageBus → CLI
+CLI → InboundMessage → MessageBus → AgentLoop
+    → SessionManager.load() → ContextBuilder → request_messages
+    → AgentRunner → LLMProvider / ToolRegistry → ToolResult → AgentRunner
+    → AgentRunResult → SessionManager.save()
+    → OutboundMessage → MessageBus → CLI
 ```
 
-项目参考 [HKUDS/nanobot](https://github.com/HKUDS/nanobot) 的分层思路，但有意保持轻量：不依赖 Agent 框架、不使用数据库，只保留消息总线、Agent Loop、Agent Runner、Provider、ToolRegistry 和 V1 的 Session/Workspace 产品层。
+项目参考 [HKUDS/nanobot](https://github.com/HKUDS/nanobot) 的分层思路，但有意保持轻量：不依赖 Agent 框架、不使用数据库，只保留消息总线、Agent Loop、Agent Runner、Provider、ToolRegistry、Session/Workspace 产品层和 V2 的 ContextBuilder。
 
-当前版本 **Mini Harness V1** 在 V0 的工具调用闭环和真实 Provider 支持之上，增加了：
+当前版本 **Mini Harness V2** 在 V0 工具调用闭环与 V1 Session/Workspace 之上，增加了 Context Engineering：
 
-- Workspace 解析与稳定的 `workspace_id`
-- 单 Channel、单默认 Session 的 JSON 持久化
-- 多轮对话跨进程重启恢复
-- `/history`、`/clear`、`/exit` CLI 命令
-- 原子保存与基本的单实例 CLI 锁
-- 基于 Workspace 路径策略的 `list_dir` / `grep` / `read_file` / `write_file` 文本工具
-- 最小 System Prompt、32 轮默认预算与预算耗尽收尾
+- 集中维护的默认 System Prompt（`mini_harness/prompts/defaults.py`）
+- Workspace 根目录 `AGENTS.md` 自动加载（UTF-8、大小限制、失败降级）
+- 独立 `ContextBuilder`：System Prompt + 历史选择 + 当前消息 → `request_messages`
+- 基于 Token 估算的上下文预算（`max_context_tokens` / `reserve_output_tokens`）
+- 按完整用户轮次裁剪历史，保持 ToolCall / ToolResult 配对
+- 最近完成轮次关键结论保护：整轮超预算时生成确定性“完成轮次摘要”，不会因大量工具输出丢掉最终 Assistant 结论
+- 每次 Provider 请求前的 ContextGovernance：检查 System + messages + Tool Schema + 输出预留，支持软/硬阈值
+- 轻量级 `ContextCompactor`：对已完成旧历史用现有 Provider 生成结构化摘要；当前用户请求与进行中的工具链原样保留
+- 大型 Tool Result 在 Provider 上下文中按 Token 截断并保留 path/offset/pattern 等元数据，Session 中的原始结果仍完整
+- `AgentRunResult.new_messages` 显式边界，避免 System Prompt 或裁剪后历史污染 Session
+- `/context` CLI 调试命令，展示真实 Token 预算与选择结果；`/last-prompt` 展示最后一次真实 Provider 请求快照
+- V1 的 Workspace、Session 持久化、多轮恢复、流式输出和全部 V0 能力保持不变
 
 ## 当前状态
 
@@ -26,7 +33,7 @@ CLI → InboundMessage → MessageBus → AgentLoop → AgentRunner
 - Provider 工厂、厂商预设、OpenAI-compatible 与 Anthropic 两种 HTTP 协议适配器。
 - 内置 23 个 Provider 预设，覆盖国内外厂商、第三方聚合平台、本地 Ollama/LM Studio 和自定义 OpenAI-compatible 服务。
 - 内置离线 `MockProvider`，无需网络和 API Key 即可体验完整工具调用流程。
-- V1 Session 历史保存在 Harness 数据目录，不写入用户 Workspace。
+- V1/V2 Session 历史保存在 Harness 数据目录，不写入用户 Workspace；System Prompt 与 AGENTS.md 不写入 Session。
 - 真实厂商 API 需要自行提供 API Key；自动化测试全部使用 httpx MockTransport 或 MockProvider，不会发起外网请求。
 
 ## 快速开始
@@ -47,6 +54,14 @@ mini-harness --interactive --workspace /path/to/project
 # 分析较大项目时提高单次 Agent 的最大迭代次数
 mini-harness --interactive --workspace /path/to/project --max-iterations 50
 
+# 按实际模型能力配置上下文预算；新 profile 会保存这些能力字段
+mini-harness --interactive --context-window-tokens 131072 --max-output-tokens 32768
+# 也可直接覆盖本次运行的输入窗口估算
+mini-harness --interactive --max-context-tokens 32768 --reserve-output-tokens 4096
+
+# 关闭流式输出，等待完整回答后一次性打印
+mini-harness --interactive --no-stream
+
 # 或运行完全离线的工具调用演示
 mini-harness --demo
 ```
@@ -64,7 +79,7 @@ python -m mini_harness --interactive
 
 `mini-harness` / `mini-bot` 不带参数时：终端环境进入交互式 CLI；非交互环境（例如管道、CI）自动运行 `--demo`，避免等待输入。
 
-## V1 架构
+## V2 架构
 
 ### 正常聊天路径
 
@@ -89,13 +104,21 @@ MessageBus
     ↓
 AgentLoop
     ↓
-Session.messages + 当前用户消息
+ContextBuilder.build_context(history, current_message)
+    ├── build_default_system_prompt(workspace)
+    ├── load AGENTS.md（每轮重新读取）
+    ├── select history（完整用户轮次 + 工具配对校验）
+    └── Token 预算估算
     ↓
-AgentRunner: LLM → Tool → LLM
+request_messages = [system, *selected_history, current_user_message]
+    ↓
+AgentRunner: LLM → Tool → LLM（不感知 Session / AGENTS.md）
     ↓
 AgentRunResult
+    ├── messages = request_messages + new_messages
+    └── new_messages / input_message_count（显式边界）
     ↓
-校验 Runner 返回的完整历史 → 更新 Session.messages
+Session.messages += current_message + new_messages（完整旧历史保留）
     ↓
 SessionManager.save()（原子写入）
     ↓
@@ -106,22 +129,24 @@ MessageBus
 CLI 显示回答
 ```
 
-`--demo` 仍然走 V0 的 MessageBus + AgentLoop 路径，只是不启用 Session。
+`--demo` 仍然走 V0 的 MessageBus + AgentLoop 路径，只是不启用 Session 与 ContextBuilder。
 
 ### 模块职责
 
 | 模块 | 职责 |
 |---|---|
 | `workspace.py` | 解析并固定 Workspace，计算稳定 ID，提供路径边界检查 |
-| `session/manager.py` | 定义 `Session`，负责 JSON 读取、原子保存和清空 |
-| `agent/loop.py` | 消费 `InboundMessage`，加载/更新/保存 Session，再发布 `OutboundMessage` |
-| `agent/prompt.py` | 按 Workspace 构造最小 System Prompt |
-| `agent/runner.py` | 只执行模型/工具迭代，不感知 Session 文件或 Workspace |
+| `session/manager.py` | 定义 `Session`，负责 JSON 读取、原子保存和清空；只保存完整历史 |
+| `agent/loop.py` | 消费 `InboundMessage`，加载 Session，调用 ContextBuilder，执行 Runner，只追加本轮新增消息 |
+| `agent/context.py` | V2 ContextBuilder：System Prompt 组装、AGENTS.md 读取、Token 估算、历史选择与预算 |
+| `agent/prompt.py` | V1 兼容导出；实际默认模板集中在 `prompts/defaults.py` |
+| `prompts/defaults.py` | 唯一的默认 System Prompt 来源 |
+| `agent/runner.py` | 只执行模型/工具迭代，不感知 Session 文件或 Workspace；返回 `new_messages` 显式边界 |
 | `bus/` | 隔离输入输出通道与 Agent 核心 |
-| `cli/app.py` | 配置选择、CLI 命令和终端展示 |
-| `tools/` | 工具注册、参数校验和执行；包含 `AddTool`、`GrepTool`、`ListDirTool`、`ReadFileTool`、`WriteFileTool` |
+| `cli/app.py` | 配置选择、CLI 命令、`/context` 和终端展示 |
+| `tools/` | 工具注册、参数校验和执行；包含加法、文件读写/搜索/编辑/元信息，以及命令执行 |
 
-Session 持久化代码没有放入 `AgentRunner` 或 `ToolRegistry`，以保持 V0 的职责划分。
+Session 持久化代码没有放入 `AgentRunner` 或 `ToolRegistry`。V2 进一步明确：Session 保存历史、ContextBuilder 构建模型输入、AgentRunner 执行；三者不混合职责。
 
 ## Workspace
 
@@ -149,16 +174,17 @@ Workspace 在启动时固定为 `Workspace` 对象，不会因为后续工具改
 启动示例：
 
 ```text
-Mini Harness V1
+Mini Harness V2
 Workspace: /private/tmp
 Session: cli:main
 History: 4 messages
 Loaded messages: 4
+Context budget: 7168 input tokens (max 8192, reserve 1024)
 ```
 
 ### Workspace ID
 
-V1 使用规范化绝对路径计算稳定 ID：
+V1/V2 使用规范化绝对路径计算稳定 ID：
 
 ```python
 workspace_id = hashlib.sha256(
@@ -171,11 +197,11 @@ workspace_id = hashlib.sha256(
 - 不使用随机 UUID。
 - Session 文件同时记录完整 Workspace 路径，加载时校验冲突。
 
-**V1 已知限制：** Workspace 被重命名或移动后，绝对路径变化会产生新的 ID，旧 Session 不会自动迁移。Nanobot 的持久 workspace-id 标记、路径迁移和复制检测不在 V1 实现范围。
+**V2 已知限制：** Workspace 被重命名或移动后，绝对路径变化会产生新的 ID，旧 Session 不会自动迁移。Nanobot 的持久 workspace-id 标记、路径迁移和复制检测不在 V2 实现范围。
 
 ### Workspace 文件路径策略
 
-`list_dir`、`grep`、`read_file` 和 `write_file` 都通过 `Workspace.resolve_path()` 解析路径，并处理：
+`list_dir`、`grep`、`read_file`、`write_file` 和 `edit_file` 都通过 `Workspace.resolve_path()` 解析路径，并处理：
 
 - `../` 路径穿越
 - Workspace 外的绝对路径
@@ -188,19 +214,21 @@ workspace = WorkspaceResolver().resolve()
 path = workspace.resolve_path("README.md")  # /workspace/README.md
 ```
 
-文件工具只支持 UTF-8 文本/Markdown：`read_file` 返回带行号的内容，`write_file` 创建父目录并覆盖目标文件。它们不会改变进程当前工作目录，也不会读取 Workspace 外的文件。
+文本工具支持 UTF-8：`read_file` 返回带行号的内容，`write_file` 支持覆盖和追加，`edit_file` 做精确替换。`file_info` 可以检查二进制文件的元信息。文件工具不会改变进程当前工作目录，路径按 Workspace 校验。
 
-**安全说明：** `Path.resolve()` + `relative_to()` 不是完整的安全沙箱。路径检查与实际打开文件之间仍可能存在并发替换符号链接的竞态，V1 将这一点明确列为后续安全强化项，而不是宣称提供了完整文件系统隔离。
+**安全说明：** `Path.resolve()` + `relative_to()` 不是完整的安全沙箱。路径检查与实际打开文件之间仍可能存在并发替换符号链接的竞态，V2 将这一点明确列为后续安全强化项，而不是宣称提供了完整文件系统隔离。
 
 ### 文件工具
 
-V1 在 Workspace 内提供四个最小文本文件工具，参考 Nanobot 的 `list_dir` / `read_file` / `write_file` 语义，并补充 `grep`：
+在 Workspace 内提供以下文件工具：
 
 ```text
 list_dir(path, recursive=False, max_entries=200)
 grep(pattern, path=".", glob="*", max_matches=100)
-read_file(path, offset=1, limit=2000)
-write_file(path, content)
+read_file(path, offset=1, limit=200)
+write_file(path, content, mode="overwrite")
+edit_file(path, old_text, new_text, replace_all=False)
+file_info(path)
 ```
 
 `list_dir`：
@@ -230,31 +258,98 @@ write_file(path, content)
 - 自动创建 Workspace 内的父目录
 - 使用同目录临时文件 + `os.replace` 原子写入
 - 适合创建新的 Markdown 文件或整体重写文件
+- `mode="append"` 只把 `content` 追加到文件末尾，不自动补换行、不重写原内容；不存在时创建文件，已有权限保持不变。追加不提供覆盖模式的原子替换保证。
+
+`file_info` 返回 JSON：`type`、`size_bytes`、UTC `mtime`、`is_binary`、`line_count` 和 `sampled`。对普通文本计算完整行数；超过 2 MiB 只检测前缀，`line_count=null`，避免为元信息加载整个大文件。二进制检测采用 UTF-8/NUL 启发式，采样结果不代表整份文件。
+
+`edit_file`：
+
+- 在已有 UTF-8 文本文件中做精确字符串替换
+- 默认要求 `old_text` 只能出现一次，避免误改
+- `replace_all=true` 时替换所有匹配
+- 使用 `read_file` 读取精确文本后再编辑；新建/完整重写请用 `write_file`
+- 保留原文件的 CRLF/LF 换行风格和权限位
 
 文件工具只在 CLI 有 Workspace 时注册；V0 无 Workspace 的兼容调用仍只有 `AddTool`。文件工具需要真实 Provider 具备 tool calling 能力；内置 `MockProvider` 是预设脚本，默认 `mock-add-demo` 仍只会调用 `add`。
 
-### System Prompt 与运行预算
+### 命令执行
 
-每轮 V1 对话在调用 Provider 前，会用 `build_system_prompt(workspace)` 临时拼接一条 `system` 消息，指导模型：
+```text
+run_command(command, cwd=".", timeout=30)
+```
 
-1. 先用 `list_dir` 看目录结构，需要深层结构时才递归；
-2. 优先读取 README、`pyproject.toml`、入口文件和核心模块，不要逐个读取所有源码；
-3. 定位类、函数或关键字时优先使用 `grep`；
-4. 通常阅读 3~8 个关键文件后立即写报告；
-5. 只依据已读内容写报告，不编造未读文件。
+CLI 有 Workspace 时自动注册。`cwd` 必须是 Workspace 内的现有目录；合并 stdout/stderr，最多保留前 16 KiB，并持续排空管道以免大输出阻塞。返回退出码，非零退出或超时记为工具错误。最长运行 120 秒；超时、取消和正常退出后都会清理 POSIX 进程组，防止后台子进程遗留。其他系统仅清理直接进程。
 
-System Prompt 只存在于传给 Provider 的临时消息列表中，不会写入 `result.messages` 或 Session，避免下一轮重复注入。
+常见 `rm`、`sudo`、`git reset --hard` 等命令通过宿主确认钩子；CLI 要求用户输入 `yes`，库调用未配置钩子时拒绝此类命令。检测只覆盖常见写法，**cwd 边界与危险命令检测都不是 shell 沙箱**：命令仍拥有当前用户的文件和网络权限。
 
-运行预算：
+`ToolRegistry(timeout_seconds=130, max_output_chars=32000)` 为所有异步工具提供取消式超时和统一输出限制。同步阻塞的第三方工具需要自行使用异步 I/O 或进程隔离，事件循环超时不能抢占同步 Python 代码。
 
-- `AgentRunSpec.max_iterations` 默认 32，`InteractiveCLI` / `run_interactive_cli` 默认也是 32；
-- CLI 支持 `--max-iterations 50` 手动调整；
+### System Prompt、AGENTS.md 与上下文预算（V2）
+
+V2 的 System Prompt 由 `ContextBuilder.build_system_prompt()` 每轮重新构建，模板的唯一来源是 `mini_harness/prompts/defaults.py`：
+
+1. 默认 System Prompt 包含 Workspace 路径、工具使用规则、不得编造工具结果等约束；
+2. 若 Workspace 根目录存在 `AGENTS.md`，其内容以 `# Workspace Instructions (AGENTS.md)` 段落追加；
+3. System Prompt 只存在于临时 `request_messages`（以及 `AgentRunResult.messages` 的输入前缀）中，不属于本轮 `new_messages`，绝不写入 Session。
+
+AGENTS.md 的 V2 规则：
+
+- 只读取 `WorkspaceResolver` 固定下来的 Workspace 根目录 `AGENTS.md`，不递归查找、不合并多份；
+- UTF-8 读取；空文件忽略；
+- 默认大小上限 16 KiB（`ContextConfig.agents_md_max_bytes`）；超过限制整份跳过，不输出半份规则；
+- 读取失败（权限、编码）记录 warning 并降级为默认 System Prompt，不打断对话；
+- 每轮重新读取，文件修改后下一轮立即生效；
+- 不自动修改 AGENTS.md，不把内容写入 Session。
+
+运行预算（`ContextConfig`，均可配置）：
+
+- `max_context_tokens`：模型上下文窗口 `C` 的估算值；未配置模型能力时保留教学默认 8192；
+- `reserve_output_tokens`：最低输出预留；未知模型沿用教学默认 1024，已配置模型窗口时默认至多预留 4096，不把最大输出能力全部永久扣除；
+- 实际接入模型时使用 `ProviderConfig.context_window_tokens` / `max_output_tokens`，CLI 能力参数同时覆盖已保存配置和新建配置；
+- 可用输入预算 `= C - reserve_output_tokens`（未知模型教学默认 7168）；
+- 每次 Provider 请求再计算 `O_effective = min(O_max, C - I - M)`，作为本次实际发送的 `max_tokens`；输入增多时输出额度相应减少，输入减少后可恢复至模型输出上限；
+
+- 再从可用输入预算中扣除 System Prompt、当前用户消息、Tool Schema 估算和消息结构开销，剩余部分才是历史预算；
+- `AgentRunSpec.max_iterations` 默认 32，CLI 支持 `--max-iterations 50`；
 - 预算耗尽时 `finalize_on_max_iterations` 会再请求一次不带工具的总结，停止原因记为 `max_iterations_finalized`；
-- 仍无法收尾的 `max_iterations` 回合不会写入 Session。
+- 已执行过工具的失败回合会保存当前用户消息与执行记录；纯失败且无工具副作用的回合不写入 Session。
+
+Token 估算使用简化算法（ASCII 约 4 字符/Token，非 ASCII 约 1 字符/Token），并额外计算角色、消息结构、tool_calls 与 Tool Schema 开销。**估算 Token 不等于模型真实 Token 数**，`reserve_output_tokens` 同时承担估算误差的安全余量。可用 `/context` 查看真实构建统计。
+
+如果 System Prompt + 当前用户消息 + 必要开销已经超过输入预算，`ContextBuilder` 会抛出 `ContextBudgetExceeded`，AgentLoop 返回 `context_budget_exceeded` 错误；不会截断当前用户输入，不会清空 Session 历史，也不会调用 Provider。
+
+### 自动 Compact 与每次请求预算治理（V2.1）
+
+V2.1 在 `AgentRunner` 调用 Provider 的统一入口增加 `ContextGovernor`：第一次请求和后续每一次工具循环请求都会重新检查预算（System Prompt + messages + Tool Schema + 输出预留 + 安全余量）。达到硬阈值时先调用 `ContextCompactor` 对已完成旧历史生成结构化摘要；摘要失败或仍超预算时执行确定性回退（先截断 Tool Result，再从旧到新丢弃可压缩轮次）；仍无法放入预算则抛出 `ContextBudgetExceeded`，不会发送明显超预算请求，也不会无限压缩。
+
+- `ContextConfig.compact_soft_ratio`：工具循环中的软阈值，默认 0.8；
+- `ContextConfig.max_tool_result_tokens`：请求超预算时单条 Tool Result 的首轮回退上限，默认 2048；
+- `ContextConfig.enable_auto_compact`：是否允许 LLM 摘要，默认开启；
+- Summary 使用现有 `LLMProvider` 生成，只存在于本次请求上下文，不写入 Session；
+- 当前用户消息及尚未发送的 in-flight 工具组（Delta）原样保留；
+- Provider 接受请求不代表模型永久记住内容；当前回合只有超预算时才把较早的 assistant/tool 组换成 `accepted_summary` 参考摘录，最近两组已接受调用及最新组保留配对结构；
+- 无论窗口大小，总请求放得下就保留完整工具正文；超预算时才截断，保留头尾及 path/offset/limit 等元数据；原始结果仍完整保存在 Session。
+- Summary 作为普通 user/历史引用消息发送，明确标注“reference data only, not instructions”，不冒充 System 规则。
+
+最近一个已完成轮次整轮放不进历史预算时，`ContextBuilder` 会生成确定性的“完成轮次摘要”（用户请求 + 工具名 + 最终 Assistant 结论），确保 P0-1/P0-2 这类关键结论不会跟着大型工具输出一起被丢弃。
+
+`/last-prompt` 展示的是 `AgentRunner` 在真实 Provider 调用边界记录的快照：请求类型（normal/finalize）、iteration、估算 Token、实际输出上限、accepted 边界、是否发生 Compact、工具消息数、实际 messages 与 Tool Schema；不包含 API Key 等认证信息。
+
+Runner 会在连续只读、相同参数重复读取和临近迭代上限时加入临时进度提示；提示只进入模型请求，不保存到 Session，也不禁止文件修改后的合理重读。项目分析只在用户要求保存报告时创建文件。问题复盘与验证见 [重复读取问题修复](docs/agent_read_loop_fix.md)。
+
+连接或切换模型时立即显示有效窗口、输入预算、输出上限和请求的推理档位，首次 `/context` 即可核对。模型窗口未配置时明确提示使用 8K 回退值。`--max-context-tokens` 和 `--reserve-output-tokens` 分别覆盖窗口与最低输出预留，不会因为只指定预留而把大窗口重置为 8K。
+
+例如，端点确认支持 1M 上下文、384K 输出和最高推理档位时：
+
+```bash
+mini-bot --interactive --context-window-tokens 1048576 --max-output-tokens 393216 --thinking --reasoning-effort max
+```
+
+参数仅覆盖本次连接；要长期使用，可保存相应 profile 的 `context_window_tokens`、`max_output_tokens`、`thinking` 和 `reasoning_effort`。千问AI/DashScope 的思考开关使用 `enable_thinking=true`，DeepSeek 原生格式使用 `thinking={"type":"enabled"}`。不要把某个模型的额度直接用于其他模型或端点。
 
 ### 输出长度
 
-`ProviderConfig.max_tokens` 和 `ProviderProfile.max_tokens` 默认从 1024 提高到 4096，给 `write_file` 的 Markdown 报告留足输出空间。旧 `config.json` 中显式保存的 1024 会在加载时迁移为 4096。
+`ProviderConfig.max_tokens` / `ProviderProfile.max_tokens` 作为兼容输出上限默认 4096；推荐在 profile 中配置 `max_output_tokens` 与 `context_window_tokens`，让 Governor 按同一请求预算动态决定实际 `max_tokens`。旧 `config.json` 中显式保存的 1024 会在加载时迁移为 4096。
 
 ## Session
 
@@ -267,7 +362,7 @@ class Session:
     messages: list[dict[str, Any]] = field(default_factory=list)
 ```
 
-V1 固定默认 Session Key：
+V1/V2 固定默认 Session Key：
 
 ```python
 DEFAULT_SESSION_KEY = "cli:main"
@@ -360,7 +455,7 @@ os.replace() 原子替换
 
 ### 并发与恢复限制
 
-V1 明确是**单进程单写者**模型：
+V2 明确是**单进程单写者**模型：
 
 - CLI 启动时会在 macOS/Linux 对当前 Workspace 的 `session.lock` 加非阻塞 `flock`；同一台机器上的第二个 CLI 实例会收到明确的 `SessionInUseError`，不会静默并发覆盖。Windows 当前没有 `fcntl`，退化为不锁，仍需按单写者使用。
 - `flock` 是建议锁，不是数据库事务；直接调用 `SessionManager` 的程序不在锁保护范围内。
@@ -379,6 +474,10 @@ mini-harness
 
 首次启动或没有默认 Provider 配置时，先选择 Provider、模型和 Base URL，并按提示输入 API Key；创建配置时默认保存为默认配置。之后启动会直接使用默认配置，不再显示选择菜单。
 
+OpenAI-compatible 配置在新建时可选择推理强度。聊天中输入 `/settings` 可修改当前模型：DeepSeek V4.1 提供 `low`、`high`、`max`，支持输入编号或档位名；`0` 恢复端点默认，回车保留当前值，`q` 取消。自定义档位按端点支持值填写。选择档位后显式请求开启思考。
+
+已有命名配置会自动保存推理设置，并立即用于下一次请求；未保存配置仅在当前连接生效。修改保留会话历史、API Key、模型和上下文/输出额度。启动时的 `--reasoning-effort` 仍可覆盖保存值。当前推理强度菜单适用于 OpenAI-compatible 适配器。
+
 保存配置位于 `~/.mini-harness/config.json`，权限为 `0600`。API Key 只保存在该配置文件，不会写入 Session JSON。
 
 ### 命令
@@ -388,12 +487,37 @@ mini-harness
 | `/help` | 查看命令帮助 |
 | `/model` | 切换 Provider / 模型（保留当前 Session 历史） |
 | `/config` | `/model` 的别名 |
+| `/settings` | 设置当前模型的推理强度，已有命名配置自动保存 |
 | `/history` | 查看当前 Session 的历史 |
+| `/context` | 查看当前上下文结构、AGENTS.md 状态、Token 预算与历史选择统计（不调用 LLM、不保存 Session） |
+| `/last-prompt` | 查看当前进程最近一次真正发给模型的完整请求消息与工具定义（不调用 LLM、不保存 Session）；进程重启后失效 |
 | `/clear` | 清空当前 Session 的内存状态和磁盘 JSON |
 | `/tools` | 查看已注册工具 |
 | `/exit` 或 `/quit` | 安全退出 |
 
 这些以 `/` 开头的命令由 CLI 本地处理，不会发送给 LLM。用户、助手、工具和错误使用不同颜色；设置 `MINI_HARNESS_NO_COLOR=1` 可关闭颜色。
+
+### 流式输出
+
+交互式 CLI 默认开启流式输出；`--no-stream` 可回退到一次性打印。流式链路为：
+
+```text
+InteractiveCLI(stream=True)
+    → StreamingAssistantRenderer
+    → AgentLoop(on_text_delta, on_tool_start)
+    → AgentRunSpec
+    → AgentRunner._request
+    → Provider.chat_stream(...)
+        → OpenAI-compatible: stream=true + SSE delta.content
+        → Anthropic: text_delta / input_json_delta
+    → Console.write_stream_delta
+    → 完整 LLMResponse 返回 Runner
+    → tool_calls / 消息历史 / Session 保存逻辑保持不变
+```
+
+流式只影响终端展示：中间文本 chunk 不会写入 `result.messages`；工具调用的分片参数会先聚合完整，再执行工具。最终回答已经流式显示时，CLI 通过 `AgentRunResult.streamed_final` 避免重复打印。
+
+注意流式输出不会改变 `max_tokens` 上限；它只是把单次回复拆成多个 chunk 传输。
 
 ## Provider 支持
 
@@ -481,7 +605,7 @@ API Key 默认从 `DEEPSEEK_API_KEY` 读取，也可以显式传入 `api_key`。
 
 ## 与 Nanobot 的对应关系
 
-| Mini Harness V1 | Nanobot |
+| Mini Harness V2 | Nanobot |
 |---|---|
 | Workspace 路径解析 | Workspace 及路径配置 |
 | Workspace ID | `session/location.py` |
@@ -489,16 +613,22 @@ API Key 默认从 `DEEPSEEK_API_KEY` 读取，也可以显式传入 `api_key`。
 | SessionManager | `SessionManager` / `SessionState` |
 | JSON 持久化 | `SqliteSessionStore`（正式实现为 SQLite） |
 | 加载历史 | `Session.get_history()` |
+| `ContextBuilder.build_system_prompt()` | 同名函数：identity + bootstrap files + tool contract + memory + skills |
+| `ContextBuilder.build_context()` | `ContextBuilder.build_transcript()` / `TranscriptInput` |
+| 根目录 AGENTS.md 加载 | `_load_bootstrap_files()`（AGENTS.md / SOUL.md / USER.md） |
+| token 估算 + 最近完整轮次选择 | `Session.get_history()` 的 `max_tokens` / `max_messages` + `find_legal_message_start()` |
+| `ContextBudgetExceeded` | `ContextWindowExceededError` / `ContextGovernor.ensure_request_fits()` |
+| `AgentRunResult.new_messages` | Nanobot 由 Session 状态与持久化边界管理，无同名字段 |
 | AgentLoop 接入 | `_process_message()` / `_build_turn()` |
 | 保存历史 | `_persist_turn()` / `finish_turn()` |
 
 需要明确区分：
 
-- **V1 实际实现：** 单 CLI Channel、Workspace 隔离、单默认 Session、JSON 文件持久化、原子替换、CLI 单实例建议锁、多轮历史恢复。
-- **Nanobot 正式源码的高级能力：** 多 Session、Session Queue、Session Lock、更完整的并发/一致性控制、SQLite/数据库存储、ContextBuilder、上下文压缩、Memory、Hooks、Checkpoint、MCP、多通道等。
-- **V1 不支持：** 多 Session 切换、会话分叉/过期、跨进程并发写入保证、SQLite、ContextBuilder、Memory、Hooks、Checkpoint、MCP、多 Channel、流式响应、运行中消息注入。
+- **V2 实际实现：** 默认 System Prompt、根目录 AGENTS.md、简化 Token 估算、按完整用户轮次裁剪历史、ToolCall/ToolResult 配对校验、`ContextBudgetExceeded`、`/context`。单 CLI Channel、单默认 Session、JSON 持久化、原子替换、多轮历史恢复保持不变。
+- **Nanobot 正式源码的高级能力：** 多 Session、Session Queue、Session Lock、更完整的并发/一致性控制、SQLite/数据库存储、完整 ContextBuilder（SOUL.md/USER.md/Memory/Skills）、ContextGovernor 压缩、Memory、Hooks、Checkpoint、MCP、多通道等。
+- **V2 不支持：** 多 Session 切换、会话分叉/过期、跨进程并发写入保证、SQLite、自动历史摘要/模型压缩、Memory、Hooks、Checkpoint、MCP、多 Channel、运行中消息注入。
 
-本实现不声称与 Nanobot 在 Session 并发、一致性或恢复能力上完全等价。
+本实现不声称与 Nanobot 在 Session 并发、一致性、上下文压缩或恢复能力上完全等价。详细的源码对照见 [`docs/context_engineering.md`](docs/context_engineering.md)。
 
 ## 项目结构
 
@@ -508,6 +638,8 @@ mini-harness/
 ├── pyproject.toml
 ├── uv.lock
 ├── README.md
+├── docs/
+│   └── context_engineering.md    # V2 上下文工程源码学习文档
 ├── mini_harness/
 │   ├── __init__.py
 │   ├── __main__.py
@@ -517,8 +649,12 @@ mini-harness/
 │   │   └── queue.py
 │   ├── agent/
 │   │   ├── loop.py               # Session 感知的 MessageBus 消费者
-│   │   ├── prompt.py             # 最小 System Prompt
+│   │   ├── context.py            # V2 ContextBuilder / ContextConfig / Token 估算
+│   │   ├── prompt.py             # V1 兼容导出，实际模板在 prompts/defaults.py
 │   │   └── runner.py
+│   ├── prompts/
+│   │   ├── __init__.py
+│   │   └── defaults.py           # 默认 System Prompt 的唯一来源
 │   ├── session/
 │   │   ├── __init__.py
 │   │   ├── manager.py            # Session / SessionManager / JSON 原子持久化
@@ -537,18 +673,23 @@ mini-harness/
 │   │   └── mock.py
 │   └── tools/
 │       ├── base.py
+│       ├── edit.py               # EditFileTool：精确字符串替换
 │       ├── filesystem.py         # GrepTool / ListDirTool / ReadFileTool / WriteFileTool
 │       └── registry.py
 └── tests/
     ├── test_bus.py
     ├── test_runner.py
     ├── test_prompt.py
+    ├── test_context.py
+    ├── test_context_budget.py
+    ├── test_context_integration.py
     ├── test_e2e.py
     ├── test_providers.py
     ├── test_cli.py
     ├── test_workspace.py
     ├── test_session.py
     ├── test_session_integration.py
+    ├── test_streaming.py
     └── test_filesystem_tools.py
 ```
 
@@ -561,7 +702,7 @@ uv run pytest -q
 当前结果：
 
 ```text
-97 passed
+163 passed
 ```
 
 测试覆盖：
@@ -569,17 +710,21 @@ uv run pytest -q
 | 测试文件 | 覆盖内容 |
 |---|---|
 | `tests/test_bus.py` | 入站/出站消息往返、asyncio.Queue FIFO |
-| `tests/test_prompt.py` | System Prompt 的 Workspace 路径和关键规则 |
+| `tests/test_prompt.py` | System Prompt 的 Workspace 路径和关键规则（V1 兼容入口） |
+| `tests/test_context.py` | 默认 System Prompt、AGENTS.md 加载/缺失/更新/空文件/大小限制/UTF-8/cwd 隔离、消息顺序与 history 不可变性、Token 估算 |
+| `tests/test_context_budget.py` | 预算公式、Tool Schema 预留、长历史按轮次裁剪、ToolCall/ToolResult 配对、孤立 tool 丢弃、超预算异常、统计字段 |
+| `tests/test_context_integration.py` | Session 完整历史保留、System Prompt 不落盘、AGENTS.md 每轮刷新、跨重启工具调用 ID、超预算保护、Runner 新增消息边界、`/context` |
 | `tests/test_runner.py` | MockProvider、消息历史、tool_call_id 配对、max_iterations、预算耗尽收尾、System Prompt 隔离、参数校验、工具异常 |
 | `tests/test_e2e.py` | V0 完整 E2E 调用链、CLI 演示输出、Loop 正常退出与停止时序 |
 | `tests/test_providers.py` | 预设完整性、工厂构建、环境变量、OpenAI/Anthropic 请求响应转换、HTTP 错误 |
-| `tests/test_cli.py` | Profile 存储与权限、API Key 持久化、默认配置、legacy max_tokens 迁移、Mock 多轮对话、`/model` 切换、Provider 目录 |
+| `tests/test_cli.py` / `tests/test_reasoning_settings.py` | Profile 存储与权限、API Key 持久化、默认配置、legacy max_tokens 迁移、多轮对话、模型切换、推理菜单保存/恢复/取消、实际请求参数更新与历史保留 |
 | `tests/test_workspace.py` | 稳定 workspace_id、不同路径隔离、`../`、绝对路径和符号链接越界检查 |
 | `tests/test_session.py` | 缺失/损坏 JSON、Workspace 冲突、独立副本、清空、原子保存失败、tool_calls 持久化、单实例锁 |
 | `tests/test_session_integration.py` | Session 重启恢复、不同 Workspace 隔离、历史不重复、第二轮 Provider 入参精确包含 system/user/assistant/tool_calls/tool_result、持久化失败、预算耗尽收尾落盘、失败回合不落盘、CLI 命令 |
-| `tests/test_filesystem_tools.py` | `list_dir`/`grep`/`read_file`/`write_file` 的递归发现、噪声目录过滤、正则搜索、路径校验、分页、UTF-8/二进制错误、Markdown 创建与覆盖、CLI 工具注册 |
+| `tests/test_streaming.py` | Mock/OpenAI/Anthropic 的流式分片、tool_calls 聚合、Runner 不写中间 chunk、CLI 不重复打印最终回答 |
+| `tests/test_filesystem_tools.py` | `list_dir`/`grep`/`read_file`/`write_file`/`edit_file` 的递归发现、噪声目录过滤、正则搜索、路径校验、分页、UTF-8/二进制错误、Markdown 创建与覆盖、精确替换、CLI 工具注册 |
 
-## V1 已实现功能与限制
+## V2 已实现功能与限制
 
 ### 已实现
 
@@ -588,33 +733,44 @@ uv run pytest -q
 - [x] JSON + `schema_version`、UTF-8、`ensure_ascii=False`
 - [x] 同目录临时文件 + `flush` + `fsync` + `os.replace` 的原子保存
 - [x] JSON 损坏、Workspace 不匹配、保存失败时明确报错并保留旧文件
-- [x] AgentLoop 接入 Session，并校验 Runner 返回历史的前缀关系
-- [x] CLI 启动摘要、`/history`、`/clear`、`/exit`
+- [x] AgentLoop 接入 Session，并用 `AgentRunResult.new_messages` 显式边界追加历史
+- [x] CLI 启动摘要、`/history`、`/context`、`/last-prompt`、`/clear`、`/exit`
 - [x] CLI 单实例 `flock` 建议锁
-- [x] `list_dir` / `grep` / `read_file` / `write_file` 文本工具，使用 Workspace 路径策略
-- [x] 最小 System Prompt、默认 32 轮预算、预算耗尽收尾
+- [x] `list_dir` / `grep` / `read_file` / `write_file` / `edit_file` 文本工具，使用 Workspace 路径策略
+- [x] 独立 ContextBuilder：默认 System Prompt + 根目录 AGENTS.md + 历史选择 + Token 预算
+- [x] 按完整用户轮次保留最近历史，ToolCall/ToolResult 严格配对
+- [x] `ContextBudgetExceeded`：超预算不截断当前输入、不改 Session、不调用 Provider
+- [x] `/context` 展示真实 System Prompt 状态、AGENTS.md、Session/选择/丢弃消息数和估算 Token
+- [x] ContextGovernor：每次 Provider 请求前检查预算，软/硬阈值触发 Compact
+- [x] 最近完成轮次摘要保护、旧历史结构化摘要、当前用户/工具链 Delta 保护
+- [x] 大型 Tool Result Provider 侧截断（带 truncated 标记与关键元数据），Session 原始结果不变
+- [x] `/last-prompt` 展示 iteration、估算 Token、Compact 状态、工具消息数与真实 messages
+- [x] 默认 32 轮 Agent 预算、预算耗尽收尾
+- [x] OpenAI-compatible / Anthropic SSE 流式文本输出，`--no-stream` 可关闭
 - [x] `max_tokens` 默认 4096 与旧配置迁移
 - [x] 失败回合不写入 Session
-- [x] V0 原有测试与 V1 新增测试全部通过
+- [x] V0/V1 原有测试与上下文、命令执行、文件工具和开发闭环回归测试
 
 ### 限制
 
 - Workspace 重命名/移动会产生新 `workspace_id`，不自动迁移旧 Session。
-- V1 只有一个 CLI Channel、一个默认 Session，不支持多 Session 切换。
+- 只有一个 CLI Channel、一个默认 Session，不支持多 Session 切换。
 - JSON 持久化是单进程单写者方案；`flock` 只保护 CLI，不保护任意库调用。
-- 不做 ContextBuilder、上下文裁剪或压缩；历史按原样传给模型。
+- Context Token 是估算值，不是模型 Tokenizer 的精确计数；8K/1K 只是教学默认值，必须按实际模型配置。
+- AGENTS.md 只读取 Workspace 根目录的一份；不递归、不合并、不解析优先级；超过 16 KiB 整份跳过。
+- Compact 只做单次轻量摘要 + 确定性回退，不做分块递归摘要、向量检索或分层记忆；摘要不写回 Session。
 - 没有长期 Memory、Hooks、Checkpoint、MCP、多通道和运行中消息注入。
-- 文件工具只支持 UTF-8 文本/Markdown，不支持图片、PDF、Office、`edit_file` 或 shell 命令。
+- 文本读取仍只支持 UTF-8，不解析图片、PDF 或 Office；本地 shell 命令通过独立 `run_command` 提供。
 - 路径检查不是完整安全沙箱，符号链接竞态和并发文件系统修改是后续强化项。
-- 没有 SQLite；V1 的 JSON 存储不适合大规模或高并发使用。
+- 没有 SQLite；JSON 存储不适合大规模或高并发使用。
 
-## 后续建议（V2，不在本次实现）
+## 后续建议（V3，不在本次实现）
 
-1. **ContextBuilder**：按 Token 预算整理历史，区分 system、history、current turn，处理长对话截断与压缩。
-2. **Session Queue / 并发控制**：每个 Session 串行处理回合，为多客户端共享同一 Session 做准备。
-3. **SQLite SessionStore**：替换 JSON 文件，引入事务、索引和更可靠的恢复能力。
-4. **更完整的文件工具**：在现有 `list_dir`/`grep`/`read_file`/`write_file` 上增加 `edit_file`、图片/PDF/Office 读取和符号链接竞态防护。
-5. **Memory / Skills / Hooks / Checkpoint / MCP**：按 Nanobot 的产品层能力逐层增加，不在 V1 提前实现。
+1. **Session Queue / 并发控制**：每个 Session 串行处理回合，为多客户端共享同一 Session 做准备。
+2. **SQLite SessionStore**：替换 JSON 文件，引入事务、索引和更可靠的恢复能力。
+3. **更完整的文件工具**：在现有 `list_dir`/`grep`/`read_file`/`write_file`/`edit_file` 上增加图片/PDF/Office 读取和符号链接竞态防护。
+4. **更高级 Context Governance**：分块递归摘要、跨回合摘要缓存、ContextGovernor 指标与可观测性面板。
+5. **Memory / Skills / Hooks / Checkpoint / MCP**：按 Nanobot 的产品层能力逐层增加，不在 V2 提前实现。
 
 ## 安全提示
 

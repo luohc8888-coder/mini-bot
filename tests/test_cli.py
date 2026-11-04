@@ -163,6 +163,7 @@ async def test_interactive_cli_saves_profile_without_api_key(
             "2",   # Provider 菜单第 2 项：DeepSeek
             "",    # 模型默认 deepseek-chat
             "",    # Base URL 使用默认值
+            "",    # 推理强度使用端点默认值
             "y",   # 保存配置
             "",    # 使用默认配置名
             "/exit",

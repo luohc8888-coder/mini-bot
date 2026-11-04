@@ -93,11 +93,50 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         help="指定 Workspace；默认使用当前工作目录",
     )
     parser.add_argument(
+        "--max-output-tokens",
+        type=int,
+        default=0,
+        metavar="N",
+        help="本次最大输出 Token（覆盖已保存配置；新建 profile 时保存）",
+    )
+    parser.add_argument(
+        "--context-window-tokens",
+        type=int,
+        default=0,
+        metavar="N",
+        help="本次模型上下文窗口 Token（覆盖已保存配置；新建 profile 时保存）",
+    )
+    parser.add_argument(
+        "--thinking",
+        action="store_true",
+        help="本次请求启用 thinking/reasoning 模式（也覆盖已保存配置）",
+    )
+    parser.add_argument(
+        "--reasoning-effort",
+        default="",
+        metavar="LEVEL",
+        help="本次请求的推理档位（如 high/max，覆盖已保存配置）",
+    )
+    parser.add_argument(
         "--max-iterations",
         type=int,
         default=32,
         metavar="N",
         help="单次 Agent 运行的最大模型/工具迭代次数，默认 32",
+    )
+    parser.add_argument(
+        "--max-context-tokens",
+        type=int,
+        default=0,
+        metavar="N",
+        help="显式覆盖模型上下文窗口；0 表示使用 profile/默认值",
+    )
+    parser.add_argument(
+        "--reserve-output-tokens",
+        type=int,
+        default=0,
+        metavar="N",
+        help="显式覆盖输出预留；0 表示使用模型配置",
     )
     stream_mode = parser.add_mutually_exclusive_group()
     stream_mode.add_argument(
@@ -138,9 +177,17 @@ async def main(argv: Sequence[str] | None = None) -> None:
                 workspace=args.workspace,
                 max_iterations=args.max_iterations,
                 stream=args.stream,
+                max_context_tokens=args.max_context_tokens,
+                reserve_output_tokens=args.reserve_output_tokens,
+                max_output_tokens=args.max_output_tokens,
+                context_window_tokens=args.context_window_tokens,
+                thinking=args.thinking,
+                reasoning_effort=args.reasoning_effort,
             )
         except WorkspaceError as exc:
             print(f"Workspace 错误：{exc}", file=sys.stderr)
+        except ValueError as exc:
+            print(f"配置错误：{exc}", file=sys.stderr)
         return
 
     await run_demo()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 
 import pytest
 
@@ -10,6 +11,10 @@ from mini_harness.agent import AgentRunSpec, AgentRunner
 from mini_harness.cli import InteractiveCLI, ProfileStore
 from mini_harness.providers import LLMResponse, MockProvider, ToolCallRequest
 from mini_harness.tools import (
+    ApplyPatchTool,
+    EditFileTool,
+    FileInfoTool,
+    FindFilesTool,
     GrepTool,
     ListDirTool,
     ReadFileTool,
@@ -121,6 +126,64 @@ async def test_list_dir_rejects_workspace_escape(tmp_path: Path) -> None:
 
     assert result.is_error
     assert "不在 Workspace 内" in result.content
+
+
+@pytest.mark.asyncio
+async def test_find_files_filters_glob_noise_and_kind(tmp_path: Path) -> None:
+    """find_files 按 glob 查找文件，过滤噪声目录并支持目录/数量限制。"""
+    ws = workspace(tmp_path)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "main.py").write_text("print('hi')", encoding="utf-8")
+    (tmp_path / "src" / "util.py").write_text("x = 1", encoding="utf-8")
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "readme.md").write_text("# Demo", encoding="utf-8")
+    (tmp_path / "nested" / "deep").mkdir(parents=True)
+    (tmp_path / "nested" / "deep" / "mod.py").write_text("y = 2", encoding="utf-8")
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "hook.py").write_text("secret", encoding="utf-8")
+
+    files = await FindFilesTool(ws).execute("**/*.py")
+
+    assert files.success
+    assert "src/main.py" in files.content
+    assert "src/util.py" in files.content
+    assert "nested/deep/mod.py" in files.content
+    assert "docs/readme.md" not in files.content
+    assert ".git" not in files.content
+
+    directories = await FindFilesTool(ws).execute("*", kind="dir")
+    assert "src/" in directories.content
+    assert "nested/deep/" in directories.content
+    assert "src/main.py" not in directories.content
+
+    limited = await FindFilesTool(ws).execute("**/*.py", max_results=1)
+    assert "(truncated, showing first 1 of 3 entries)" in limited.content
+
+    scoped = await FindFilesTool(ws).execute("*.py", path="src")
+    assert "main.py" in scoped.content
+    assert "nested" not in scoped.content
+
+
+@pytest.mark.asyncio
+async def test_find_files_rejects_invalid_arguments_and_escape(tmp_path: Path) -> None:
+    """空 pattern、非法 kind、文件起点和越界路径都返回错误。"""
+    ws = workspace(tmp_path / "workspace")
+    (tmp_path / "outside").mkdir()
+    tool = FindFilesTool(ws)
+
+    assert (await tool.execute("")).is_error
+    assert (await tool.execute("*", kind="invalid")).is_error
+    assert (await tool.execute("*", max_results=0)).is_error
+
+    file_target = tmp_path / "workspace" / "note.md"
+    file_target.write_text("note", encoding="utf-8")
+    not_directory = await tool.execute("*", path="note.md")
+    assert not_directory.is_error
+    assert "Not a directory" in not_directory.content
+
+    escape = await tool.execute("*", path="../outside")
+    assert escape.is_error
+    assert "不在 Workspace 内" in escape.content
 
 
 @pytest.mark.asyncio
@@ -242,16 +305,32 @@ async def test_agent_runner_can_call_read_file(tmp_path: Path) -> None:
 
 
 def test_file_tools_expose_nanobot_style_schemas(tmp_path: Path) -> None:
-    """四个文件工具可通过 ToolRegistry 注册并暴露正确参数定义。"""
+    """文件工具可通过 ToolRegistry 注册并暴露正确参数定义。"""
     registry = ToolRegistry()
     ws = workspace(tmp_path)
+    registry.register(FindFilesTool(ws))
     registry.register(GrepTool(ws))
     registry.register(ListDirTool(ws))
     registry.register(ReadFileTool(ws))
     registry.register(WriteFileTool(ws))
+    registry.register(EditFileTool(ws))
+    registry.register(ApplyPatchTool(ws))
+    registry.register(FileInfoTool(ws))
 
     definitions = {item["function"]["name"]: item for item in registry.get_definitions()}
-    assert set(definitions) == {"grep", "list_dir", "read_file", "write_file"}
+    assert set(definitions) == {
+        "apply_patch",
+        "edit_file",
+        "file_info",
+        "find_files",
+        "grep",
+        "list_dir",
+        "read_file",
+        "write_file",
+    }
+    assert definitions["find_files"]["function"]["parameters"]["required"] == [
+        "pattern"
+    ]
     assert definitions["grep"]["function"]["parameters"]["required"] == ["pattern"]
     assert definitions["list_dir"]["function"]["parameters"]["required"] == ["path"]
     assert definitions["read_file"]["function"]["parameters"]["required"] == ["path"]
@@ -259,19 +338,226 @@ def test_file_tools_expose_nanobot_style_schemas(tmp_path: Path) -> None:
         "path",
         "content",
     ]
+    assert definitions["edit_file"]["function"]["parameters"]["required"] == [
+        "path",
+        "old_text",
+        "new_text",
+    ]
+    assert definitions["apply_patch"]["function"]["parameters"]["required"] == [
+        "edits"
+    ]
 
 
 def test_cli_registers_file_tools_when_workspace_is_available(tmp_path: Path) -> None:
     """V1 CLI 在有 Workspace 时注册文件工具，V0 兼容模式不注册。"""
     store = ProfileStore(tmp_path / "profiles.json")
     cli = InteractiveCLI(profile_store=store, workspace=tmp_path)
+    assert "find_files" in cli.tools
     assert "grep" in cli.tools
     assert "list_dir" in cli.tools
     assert "read_file" in cli.tools
     assert "write_file" in cli.tools
+    assert "edit_file" in cli.tools
+    assert "apply_patch" in cli.tools
+    assert "run_command" in cli.tools
+    assert "file_info" in cli.tools
 
     v0_cli = InteractiveCLI(profile_store=store)
+    assert "find_files" not in v0_cli.tools
     assert "grep" not in v0_cli.tools
     assert "list_dir" not in v0_cli.tools
     assert "read_file" not in v0_cli.tools
     assert "write_file" not in v0_cli.tools
+    assert "edit_file" not in v0_cli.tools
+    assert "apply_patch" not in v0_cli.tools
+    assert "run_command" not in v0_cli.tools
+    assert "file_info" not in v0_cli.tools
+
+
+@pytest.mark.asyncio
+async def test_append_preserves_original_bytes_and_creates_files(tmp_path: Path) -> None:
+    tool = WriteFileTool(workspace(tmp_path))
+    target = tmp_path / "note.md"
+    target.write_bytes(b"original\r\n")
+    assert (await tool.execute("note.md", "追加\n", mode="append")).success
+    assert target.read_bytes() == b"original\r\n" + "追加\n".encode()
+    assert (await tool.execute("nested/new.txt", "new", mode="append")).success
+    assert (tmp_path / "nested/new.txt").read_text() == "new"
+    assert (await tool.execute("note.md", "bad", mode="invalid")).is_error
+    assert (await tool.execute("../outside.txt", "bad", mode="append")).is_error
+    (tmp_path / "outside-link").symlink_to(tmp_path.parent / "outside.txt")
+    assert (await tool.execute("outside-link", "bad", mode="append")).is_error
+
+
+@pytest.mark.asyncio
+async def test_file_info_reports_text_binary_directory_and_large_file(tmp_path: Path) -> None:
+    tool = FileInfoTool(workspace(tmp_path))
+    (tmp_path / "text.txt").write_text("你好\r\nsecond")
+    data = json.loads((await tool.execute("text.txt")).content)
+    assert data["type"] == "file" and data["line_count"] == 2
+    assert data["size_bytes"] == len("你好\r\nsecond".encode())
+    assert data["is_binary"] is False and data["sampled"] is False
+    assert data["mtime"].endswith("+00:00")
+    (tmp_path / "empty").touch()
+    assert json.loads((await tool.execute("empty")).content)["line_count"] == 0
+    for binary in (b"\x00abc", b"\xff\xfe"):
+        (tmp_path / "binary").write_bytes(binary)
+        info = json.loads((await tool.execute("binary")).content)
+        assert info["is_binary"] is True and info["line_count"] is None
+    assert json.loads((await tool.execute(".")).content)["type"] == "directory"
+    (tmp_path / "large").write_bytes("中".encode() * 800000)
+    info = json.loads((await tool.execute("large")).content)
+    assert info["sampled"] is True and info["line_count"] is None
+    assert info["is_binary"] is False  # 采样边缘不能把半个 UTF-8 字符判为二进制。
+    assert (await tool.execute("missing")).is_error
+    assert (await tool.execute("..")).is_error
+    (tmp_path / "link").symlink_to(tmp_path.parent, target_is_directory=True)
+    assert (await tool.execute("link")).is_error
+
+
+@pytest.mark.asyncio
+async def test_grep_skips_symlinks_outside_workspace(tmp_path: Path) -> None:
+    base = tmp_path / "workspace"
+    ws = workspace(base)
+    (tmp_path / "secret.txt").write_text("SECRET")
+    (base / "link.txt").symlink_to(tmp_path / "secret.txt")
+    result = await GrepTool(ws).execute("SECRET")
+    assert result.success and "SECRET" not in result.content.replace("'SECRET'", "")
+
+
+@pytest.mark.asyncio
+async def test_edit_file_replaces_unique_text(tmp_path: Path) -> None:
+    """edit_file 替换唯一匹配并保留文件内容。"""
+    ws = workspace(tmp_path)
+    target = tmp_path / "note.md"
+    target.write_text("hello world\n", encoding="utf-8")
+
+    result = await EditFileTool(ws).execute(
+        "note.md",
+        old_text="world",
+        new_text="Mini Harness",
+    )
+
+    assert result.success
+    assert "replaced 1 occurrence" in result.content
+    assert target.read_text(encoding="utf-8") == "hello Mini Harness\n"
+
+
+@pytest.mark.asyncio
+async def test_edit_file_rejects_ambiguous_match_unless_replace_all(
+    tmp_path: Path,
+) -> None:
+    """默认拒绝多处匹配，replace_all=True 时全部替换。"""
+    ws = workspace(tmp_path)
+    target = tmp_path / "note.md"
+    target.write_text("foo foo", encoding="utf-8")
+
+    ambiguous = await EditFileTool(ws).execute(
+        "note.md",
+        old_text="foo",
+        new_text="bar",
+    )
+    assert ambiguous.is_error
+    assert "appears 2 times" in ambiguous.content
+
+    result = await EditFileTool(ws).execute(
+        "note.md",
+        old_text="foo",
+        new_text="bar",
+        replace_all=True,
+    )
+    assert result.success
+    assert "replaced 2 occurrence" in result.content
+    assert target.read_text(encoding="utf-8") == "bar bar"
+
+
+@pytest.mark.asyncio
+async def test_edit_file_preserves_crlf(tmp_path: Path) -> None:
+    """编辑 CRLF 文件时保留原有换行风格。"""
+    ws = workspace(tmp_path)
+    target = tmp_path / "note.txt"
+    target.write_bytes(b"a\r\nb\r\n")
+
+    result = await EditFileTool(ws).execute(
+        "note.txt",
+        old_text="b",
+        new_text="B",
+    )
+
+    assert result.success
+    assert target.read_bytes() == b"a\r\nB\r\n"
+
+
+@pytest.mark.asyncio
+async def test_edit_file_errors_for_missing_text_and_escape(tmp_path: Path) -> None:
+    """old_text 不存在、文件不存在和越界路径都返回错误。"""
+    ws = workspace(tmp_path / "workspace")
+    target = tmp_path / "workspace" / "note.md"
+    target.parent.mkdir(exist_ok=True)
+    target.write_text("hello", encoding="utf-8")
+
+    missing_text = await EditFileTool(ws).execute(
+        "note.md",
+        old_text="not-there",
+        new_text="x",
+    )
+    assert missing_text.is_error
+    assert "old_text not found" in missing_text.content
+
+    missing_file = await EditFileTool(ws).execute(
+        "missing.md",
+        old_text="x",
+        new_text="y",
+    )
+    assert missing_file.is_error
+    assert "File not found" in missing_file.content
+
+    escape = await EditFileTool(ws).execute(
+        "../outside.md",
+        old_text="x",
+        new_text="y",
+    )
+    assert escape.is_error
+    assert "不在 Workspace 内" in escape.content
+
+
+@pytest.mark.asyncio
+async def test_agent_runner_can_call_edit_file(tmp_path: Path) -> None:
+    """AgentRunner 能通过 ToolRegistry 执行 edit_file 并记录 tool 消息。"""
+    ws = workspace(tmp_path)
+    target = tmp_path / "note.md"
+    target.write_text("hello old world", encoding="utf-8")
+    tools = ToolRegistry()
+    tools.register(EditFileTool(ws))
+    provider = MockProvider(
+        [
+            LLMResponse(
+                content=None,
+                tool_calls=[
+                    ToolCallRequest(
+                        id="edit_001",
+                        name="edit_file",
+                        arguments={
+                            "path": "note.md",
+                            "old_text": "old",
+                            "new_text": "new",
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(content="编辑完成", finish_reason="stop"),
+        ]
+    )
+
+    result = await AgentRunner(provider, tools).run(
+        AgentRunSpec(
+            initial_messages=[{"role": "user", "content": "编辑 note.md"}]
+        )
+    )
+
+    assert result.final_content == "编辑完成"
+    assert result.messages[1]["tool_calls"][0]["name"] == "edit_file"
+    assert result.messages[2]["role"] == "tool"
+    assert "Successfully edited" in result.messages[2]["content"]
+    assert target.read_text(encoding="utf-8") == "hello new world"

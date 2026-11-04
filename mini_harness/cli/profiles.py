@@ -30,6 +30,10 @@ class ProviderProfile:
     base_url: str = ""
     temperature: float = 0.0
     max_tokens: int = DEFAULT_MAX_TOKENS
+    max_output_tokens: int = 0
+    context_window_tokens: int = 0
+    thinking: bool = False
+    reasoning_effort: str = ""
     api_key: str = ""
     is_default: bool = False
 
@@ -43,6 +47,10 @@ class ProviderProfile:
             base_url=config.base_url or "",
             temperature=config.temperature,
             max_tokens=config.max_tokens,
+            max_output_tokens=config.max_output_tokens,
+            context_window_tokens=config.context_window_tokens,
+            thinking=config.thinking,
+            reasoning_effort=config.reasoning_effort,
             api_key=config.api_key or "",
         )
 
@@ -55,6 +63,10 @@ class ProviderProfile:
             base_url=self.base_url,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
+            max_output_tokens=self.max_output_tokens,
+            context_window_tokens=self.context_window_tokens,
+            thinking=self.thinking,
+            reasoning_effort=self.reasoning_effort,
         )
 
 
@@ -123,6 +135,12 @@ class ProfileStore:
                     if raw_max_tokens == _LEGACY_MAX_TOKENS
                     else raw_max_tokens
                 )
+                raw_max_output = int(item.get("max_output_tokens", 0))
+                raw_context_window = int(
+                    item.get("context_window_tokens", 0)
+                )
+                if raw_max_output < 0 or raw_context_window < 0:
+                    continue
                 profiles.append(
                     ProviderProfile(
                         name=name,
@@ -131,6 +149,12 @@ class ProfileStore:
                         base_url=base_url,
                         temperature=float(item.get("temperature", 0.0)),
                         max_tokens=max_tokens,
+                        max_output_tokens=raw_max_output,
+                        context_window_tokens=raw_context_window,
+                        thinking=bool(item.get("thinking", False)),
+                        reasoning_effort=str(
+                            item.get("reasoning_effort", "") or ""
+                        ),
                         api_key=api_key,
                         is_default=bool(item.get("is_default", False)),
                     )

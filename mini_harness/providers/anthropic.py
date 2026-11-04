@@ -37,6 +37,9 @@ class AnthropicProvider(LLMProvider):
         extra_headers: dict[str, str] | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
         provider_name: str = "Anthropic",
+        context_window_tokens: int = 0,
+        thinking: bool = False,
+        reasoning_effort: str = "",
     ) -> None:
         """保存 Anthropic 连接参数。
 
@@ -63,6 +66,9 @@ class AnthropicProvider(LLMProvider):
         self.extra_headers = dict(extra_headers or {})
         self.transport = transport
         self.provider_name = provider_name
+        self.context_window_tokens = context_window_tokens
+        self.thinking = thinking
+        self.reasoning_effort = reasoning_effort
 
     @property
     def messages_url(self) -> str:
@@ -205,6 +211,8 @@ class AnthropicProvider(LLMProvider):
         anthropic_tools = self._convert_tools(tools)
         if anthropic_tools:
             payload["tools"] = anthropic_tools
+        if self.thinking:
+            payload["thinking"] = {"type": "enabled"}
         if stream:
             payload["stream"] = True
         return payload

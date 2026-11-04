@@ -56,7 +56,7 @@ class Tool(ABC):
 
     name: str = ""
     description: str = ""
-    # JSON Schema：V0 只支持常见的顶层 object 参数校验。
+    # JSON Schema：支持嵌套 object/array、标量类型与常用范围约束。
     parameters: dict[str, Any] = {}
 
     def to_definition(self) -> dict[str, Any]:
@@ -81,6 +81,10 @@ class Tool(ABC):
     def validate_arguments(self, arguments: Any) -> list[str]:
         """按 ``parameters`` JSON Schema 校验工具参数。
 
+        支持顶层与嵌套 object/array 的 required、类型、enum、数值上下界、
+        ``additionalProperties`` 以及数组 ``minItems``/``maxItems``。
+        嵌套错误用 ``edits[0].path`` 形式定位。
+
         Args:
             arguments: Provider 给出的参数，应为 JSON object（dict）。
 
@@ -95,34 +99,85 @@ class Tool(ABC):
         if not isinstance(arguments, dict):
             return [f"参数必须是 JSON 对象，实际为 {type(arguments).__name__}"]
 
-        schema = self.parameters
+        errors: list[str] = []
+        self._validate_object(arguments, self.parameters, "", errors)
+        return errors
+
+    def _validate_object(
+        self,
+        value: dict[str, Any],
+        schema: dict[str, Any],
+        prefix: str,
+        errors: list[str],
+    ) -> None:
+        """递归校验 JSON object 的必填字段和属性。"""
         properties: dict[str, Any] = schema.get("properties", {})
         required: list[str] = schema.get("required", [])
-        errors: list[str] = []
 
         for name in required:
-            if name not in arguments:
-                errors.append(f"缺少必填参数：{name}")
+            if name not in value:
+                errors.append(f"缺少必填参数：{self._label(prefix, name)}")
 
-        for name, value in arguments.items():
+        for name, item in value.items():
+            label = self._label(prefix, name)
             if name not in properties:
                 if schema.get("additionalProperties", True) is False:
-                    errors.append(f"不支持参数：{name}")
+                    errors.append(f"不支持参数：{label}")
                 continue
+            self._validate_value(item, properties[name], label, errors)
 
-            expected_type = properties[name].get("type")
-            if expected_type and not self._matches_type(value, expected_type):
-                errors.append(
-                    f"参数 {name} 类型错误：期望 {expected_type}，"
-                    f"实际 {type(value).__name__}"
-                )
-                continue
+    def _validate_value(
+        self,
+        value: Any,
+        schema: dict[str, Any],
+        label: str,
+        errors: list[str],
+    ) -> None:
+        """递归校验单个值，并把嵌套错误写回 ``errors``。"""
+        expected_type = schema.get("type")
+        if expected_type and not self._matches_type(value, expected_type):
+            errors.append(
+                f"参数 {label} 类型错误：期望 {expected_type}，"
+                f"实际 {type(value).__name__}"
+            )
+            return
 
-            enum_values = properties[name].get("enum")
-            if enum_values is not None and value not in enum_values:
-                errors.append(f"参数 {name} 必须是 {enum_values} 之一")
+        enum_values = schema.get("enum")
+        if enum_values is not None and value not in enum_values:
+            errors.append(f"参数 {label} 必须是 {enum_values} 之一")
 
-        return errors
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            minimum = schema.get("minimum")
+            maximum = schema.get("maximum")
+            if minimum is not None and value < minimum:
+                errors.append(f"参数 {label} 必须 >= {minimum}")
+            if maximum is not None and value > maximum:
+                errors.append(f"参数 {label} 必须 <= {maximum}")
+
+        if expected_type == "array" and isinstance(value, list):
+            minimum_items = schema.get("minItems")
+            maximum_items = schema.get("maxItems")
+            if minimum_items is not None and len(value) < minimum_items:
+                errors.append(f"参数 {label} 至少需要 {minimum_items} 项")
+            if maximum_items is not None and len(value) > maximum_items:
+                errors.append(f"参数 {label} 最多允许 {maximum_items} 项")
+
+            items_schema = schema.get("items")
+            if isinstance(items_schema, dict):
+                for index, item in enumerate(value):
+                    self._validate_value(
+                        item,
+                        items_schema,
+                        f"{label}[{index}]",
+                        errors,
+                    )
+        elif expected_type == "object" and isinstance(value, dict):
+            self._validate_object(value, schema, label, errors)
+
+    @staticmethod
+    def _label(prefix: str, name: str) -> str:
+        """拼接嵌套字段路径，例如 ``edits[0].path``。"""
+        return f"{prefix}.{name}" if prefix else name
 
     @staticmethod
     def _matches_type(value: Any, expected_type: str) -> bool:

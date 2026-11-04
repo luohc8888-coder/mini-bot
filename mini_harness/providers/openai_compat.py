@@ -7,6 +7,7 @@ DeepSeek、Qwen、GLM、Moonshot、OpenRouter、SiliconFlow、Ollama 等大量�
 from __future__ import annotations
 
 import json
+from urllib.parse import urlsplit
 from typing import Any
 
 import httpx
@@ -73,6 +74,9 @@ class OpenAICompatibleProvider(LLMProvider):
         extra_headers: dict[str, str] | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
         provider_name: str = "OpenAI-compatible",
+        context_window_tokens: int = 0,
+        thinking: bool = False,
+        reasoning_effort: str = "",
     ) -> None:
         """保存连接参数。
 
@@ -99,6 +103,9 @@ class OpenAICompatibleProvider(LLMProvider):
         self.extra_headers = dict(extra_headers or {})
         self.transport = transport
         self.provider_name = provider_name
+        self.context_window_tokens = context_window_tokens
+        self.thinking = thinking
+        self.reasoning_effort = reasoning_effort
 
     @property
     def chat_url(self) -> str:
@@ -149,6 +156,8 @@ class OpenAICompatibleProvider(LLMProvider):
                 ]
             if converted["content"] is None and not tool_calls:
                 converted["content"] = ""
+            if message.get("reasoning_content") is not None:
+                converted["reasoning_content"] = message["reasoning_content"]
             return converted
 
         if role == "tool":
@@ -205,6 +214,14 @@ class OpenAICompatibleProvider(LLMProvider):
             payload["max_tokens"] = self.max_tokens
         if tools:
             payload["tools"] = tools
+        if self.thinking:
+            host = urlsplit(self.base_url).hostname or ""
+            if host == "maas.qianwenaiapi.com" or host == "dashscope.aliyuncs.com" or host.endswith(".aliyuncs.com") and host.startswith("dashscope"):
+                payload["enable_thinking"] = True
+            else:
+                payload["thinking"] = {"type": "enabled"}
+        if self.reasoning_effort:
+            payload["reasoning_effort"] = self.reasoning_effort
         if stream:
             payload["stream"] = True
         return payload
@@ -324,6 +341,11 @@ class OpenAICompatibleProvider(LLMProvider):
             content=_normalize_content(message.get("content")),
             tool_calls=tool_calls,
             finish_reason=str(choice.get("finish_reason") or "stop"),
+            reasoning_content=(
+                str(message["reasoning_content"])
+                if message.get("reasoning_content") is not None
+                else None
+            ),
         )
 
     async def chat_stream(
@@ -343,6 +365,7 @@ class OpenAICompatibleProvider(LLMProvider):
 
         payload = self._build_payload(messages, tools, stream=True)
         content_parts: list[str] = []
+        reasoning_parts: list[str] = []
         tool_buffers: dict[int, dict[str, str]] = {}
         finish_reason = "stop"
 
@@ -393,6 +416,9 @@ class OpenAICompatibleProvider(LLMProvider):
                         if text:
                             content_parts.append(text)
                             on_text_delta(text)
+                        reasoning = delta.get("reasoning_content")
+                        if isinstance(reasoning, str) and reasoning:
+                            reasoning_parts.append(reasoning)
 
                         for raw_call in delta.get("tool_calls") or []:
                             if not isinstance(raw_call, dict):
@@ -435,6 +461,7 @@ class OpenAICompatibleProvider(LLMProvider):
             content="".join(content_parts) or None,
             tool_calls=self._build_tool_calls(tool_buffers),
             finish_reason=finish_reason,
+            reasoning_content="".join(reasoning_parts) or None,
         )
 
     def _format_http_error(self, response: httpx.Response) -> str:

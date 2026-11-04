@@ -5,7 +5,12 @@ from .agent import (
     AgentRunResult,
     AgentRunSpec,
     AgentRunner,
+    ContextBudgetExceeded,
+    ContextBuilder,
+    ContextConfig,
+    ContextStats,
     build_system_prompt,
+    estimate_tokens,
 )
 from .bus import InboundMessage, MessageBus, OutboundMessage
 from .session import (
@@ -27,11 +32,16 @@ from .providers import (
     ProviderPreset,
     TextDeltaCallback,
     ToolCallRequest,
+    ToolStartCallback,
     create_provider,
     get_preset,
 )
 from .tools import (
     AddTool,
+    ApplyPatchTool,
+    EditFileTool,
+    FileInfoTool,
+    FindFilesTool,
     GrepTool,
     ListDirTool,
     ReadFileTool,
@@ -41,7 +51,7 @@ from .tools import (
     WriteFileTool,
 )
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "AddTool",
@@ -50,7 +60,15 @@ __all__ = [
     "AgentRunSpec",
     "AgentRunner",
     "AnthropicProvider",
+    "ApplyPatchTool",
+    "ContextBudgetExceeded",
+    "ContextBuilder",
+    "ContextConfig",
+    "ContextStats",
     "DEFAULT_SESSION_KEY",
+    "EditFileTool",
+    "FileInfoTool",
+    "FindFilesTool",
     "GrepTool",
     "InboundMessage",
     "LLMProvider",
@@ -69,6 +87,7 @@ __all__ = [
     "SessionManager",
     "TextDeltaCallback",
     "Tool",
+    "ToolStartCallback",
     "ToolCallRequest",
     "ToolRegistry",
     "ToolResult",
@@ -77,5 +96,6 @@ __all__ = [
     "WriteFileTool",
     "build_system_prompt",
     "create_provider",
+    "estimate_tokens",
     "get_preset",
 ]
