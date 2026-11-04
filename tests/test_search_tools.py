@@ -81,11 +81,3 @@ async def test_noise_directories_are_pruned_before_traversal(tmp_path: Path, mon
         result = await GrepTool(workspace).execute("match")
     assert result.success and "main.py" in result.content
     assert "hidden.py" not in result.content
-
-
-def test_legacy_module_imports_remain_available() -> None:
-    from mini_harness.tools.filesystem import FindFilesTool as LegacyFind
-    from mini_harness.tools.patch import ApplyPatchTool as LegacyPatch
-    from mini_harness.tools import ApplyPatchTool
-    assert LegacyFind is FindFilesTool
-    assert LegacyPatch is ApplyPatchTool

@@ -386,6 +386,7 @@ class GrepTool(Tool):
                 candidates = (
                     item for item in _iter_paths(self.workspace, target)
                     if _matches_glob(item.relative_to(target), pattern_parts)
+                    and (not glob.endswith(os.sep) or item.is_dir())
                 )
                 base = target
             else:

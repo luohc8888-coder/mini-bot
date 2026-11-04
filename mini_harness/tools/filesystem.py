@@ -16,9 +16,6 @@ from mini_harness.workspace import Workspace, WorkspaceError
 from ._file_io import _MAX_READ_BYTES, _atomic_write_text
 from .base import Tool, ToolResult
 
-# 保留历史模块导入；正式实现和包级导出均位于 search.py。
-from .search import FindFilesTool, GrepTool, ListDirTool
-
 _MAX_OUTPUT_CHARS = 128_000
 _DEFAULT_LINE_LIMIT = 200
 

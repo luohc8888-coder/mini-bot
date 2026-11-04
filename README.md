@@ -295,8 +295,8 @@ file_info(path)
 | `tools/_file_io.py` | 低层文件大小限制、保权限的原子写入，不依赖具体工具 |
 | `tools/command.py` | 命令执行及进程管理 |
 
-包级导入保持不变；`tools/patch.py` 和原 `tools/filesystem.py` 中的搜索类导入
-入口保留兼容，实际实现分别集中在 `edit.py`、`search.py`。
+统一通过 `mini_harness.tools` 导入公开工具；需要按实现模块导入时，搜索工具
+使用 `mini_harness.tools.search`，编辑工具使用 `mini_harness.tools.edit`。
 
 文件工具只在 CLI 有 Workspace 时注册；V0 无 Workspace 的兼容调用仍只有 `AddTool`。文件工具需要真实 Provider 具备 tool calling 能力；内置 `MockProvider` 是预设脚本，默认 `mock-add-demo` 仍只会调用 `add`。
 
