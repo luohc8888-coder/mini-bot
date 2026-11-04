@@ -84,19 +84,20 @@ def test_unknown_model_does_not_inherit_previous_model_window(tmp_path: Path) ->
 @pytest.mark.asyncio
 async def test_output_limit_tracks_remaining_window_and_recovers() -> None:
     provider = MockProvider([])
-    provider.max_tokens = 12000
+    provider.max_output_tokens = 12000
     provider.context_window_tokens = 1048576
     governor = ContextGovernor(provider, ContextConfig(max_context_tokens=16384, reserve_output_tokens=1024))
     large = await governor.prepare_request([{"role": "user", "content": "x" * 40000}], None)
-    assert provider.max_tokens == 16384 - large.estimated_tokens
-    assert provider.max_tokens < 12000
+    assert provider.output_token_limit == 16384 - large.estimated_tokens
+    assert provider.output_token_limit < 12000
+    assert provider.max_output_tokens == 12000
     await governor.prepare_request([{"role": "user", "content": "small"}], None)
-    assert provider.max_tokens == 12000
+    assert provider.output_token_limit == 12000
 
 
 def test_maximum_output_is_not_reserved_from_every_request() -> None:
     provider = MockProvider([])
-    provider.max_tokens = 393216
+    provider.max_output_tokens = 393216
     provider.context_window_tokens = 1048576
     config = ContextConfig.from_provider(provider)
     assert config.max_context_tokens == 1048576
@@ -109,7 +110,7 @@ def test_maximum_output_is_not_reserved_from_every_request() -> None:
     ("https://api.deepseek.com/v1", "thinking"),
 ])
 def test_thinking_payload_uses_endpoint_format(host: str, key: str) -> None:
-    provider = OpenAICompatibleProvider(api_key="test", base_url=host, model="deepseek-v4.1-flash-1017", thinking=True, reasoning_effort="max", max_tokens=393216)
+    provider = OpenAICompatibleProvider(api_key="test", base_url=host, model="deepseek-v4.1-flash-1017", thinking=True, reasoning_effort="max", max_output_tokens=393216)
     payload = provider._build_payload([{"role": "user", "content": "OK"}], None)
     assert payload[key] == (True if key == "enable_thinking" else {"type": "enabled"})
     assert payload["reasoning_effort"] == "max" and payload["max_tokens"] == 393216

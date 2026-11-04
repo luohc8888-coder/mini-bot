@@ -41,6 +41,10 @@ from mini_harness.providers.base import (
     TextDeltaCallback,
     ToolStartCallback,
 )
+from mini_harness.providers.config import (
+    DEFAULT_MAX_OUTPUT_TOKENS,
+    validate_max_output_tokens,
+)
 from mini_harness.session import (
     SessionError,
     SessionManager,
@@ -60,7 +64,7 @@ from mini_harness.tools import (
     WriteFileTool,
 )
 
-from .profiles import ProfileStore, ProviderProfile
+from .profiles import ProfileStore, ProfileStoreError, ProviderProfile
 
 
 @dataclass(slots=True)
@@ -246,7 +250,7 @@ class InteractiveCLI:
         stream: bool = False,
         context_config: ContextConfig | None = None,
         turn_timeout: float | None = None,
-        max_output_tokens: int = 0,
+        max_output_tokens: int | None = None,
         context_window_tokens: int = 0,
         thinking: bool = False,
         reasoning_effort: str = "",
@@ -280,6 +284,8 @@ class InteractiveCLI:
             context_config.reserve_output_tokens if context_config else 0
         )
         self.turn_timeout = turn_timeout
+        if max_output_tokens is not None:
+            validate_max_output_tokens(max_output_tokens)
         self.max_output_tokens = max_output_tokens
         self.context_window_tokens = context_window_tokens
         self.thinking = thinking
@@ -375,7 +381,7 @@ class InteractiveCLI:
                             return
                 except (KeyboardInterrupt, EOFError):
                     self.console.write("\n已退出。")
-        except SessionError as exc:
+        except (SessionError, ProfileStoreError) as exc:
             self.console.write_error(str(exc))
 
     def _show_banner(self) -> None:
@@ -486,7 +492,11 @@ class InteractiveCLI:
             model=model,
             api_key=api_key,
             base_url=base_url,
-            max_output_tokens=self.max_output_tokens,
+            max_output_tokens=(
+                self.max_output_tokens
+                if self.max_output_tokens is not None
+                else DEFAULT_MAX_OUTPUT_TOKENS
+            ),
             context_window_tokens=self.context_window_tokens,
             thinking=self.thinking,
             reasoning_effort=self.reasoning_effort,
@@ -554,7 +564,6 @@ class InteractiveCLI:
             api_key=api_key,
             base_url=base_url,
             temperature=profile.temperature,
-            max_tokens=profile.max_tokens,
             max_output_tokens=profile.max_output_tokens,
             context_window_tokens=profile.context_window_tokens,
             thinking=profile.thinking,
@@ -645,7 +654,11 @@ class InteractiveCLI:
         return replace(
             config,
             context_window_tokens=self.context_window_tokens or config.context_window_tokens,
-            max_output_tokens=self.max_output_tokens or config.max_output_tokens,
+            max_output_tokens=(
+                self.max_output_tokens
+                if self.max_output_tokens is not None
+                else config.max_output_tokens
+            ),
             thinking=self.thinking or config.thinking,
             reasoning_effort=self.reasoning_effort or config.reasoning_effort,
         )
@@ -658,7 +671,7 @@ class InteractiveCLI:
         self.console.write(
             f"模型预算：上下文 {self.context_config.max_context_tokens} tokens，"
             f"输入预算 {self.context_config.available_input_tokens}，"
-            f"最大输出 {selection.config.max_output_tokens or selection.config.max_tokens}；"
+            f"最大输出 {selection.config.max_output_tokens}；"
             f"思考={'请求开启' if selection.config.thinking else '端点默认'}，"
             f"推理档位={selection.config.reasoning_effort or '端点默认'}"
         )
@@ -933,14 +946,14 @@ class InteractiveCLI:
         context_window = (
             self._max_context_tokens_override or config.context_window_tokens
         )
-        max_output = config.max_output_tokens or config.max_tokens
+        max_output = config.max_output_tokens
         base = getattr(self, "_base_context_config", self.context_config)
         if context_window <= 0:
             return replace(
                 base,
                 reserve_output_tokens=self._reserve_output_tokens_override or base.reserve_output_tokens,
             )
-        if max_output <= 0 or max_output >= context_window:
+        if max_output >= context_window:
             max_output = min(4096, max(1, context_window // 4))
         return ContextConfig(
             max_context_tokens=context_window,
@@ -1389,7 +1402,7 @@ async def run_interactive_cli(
     stream: bool = True,
     max_context_tokens: int = 0,
     reserve_output_tokens: int = 0,
-    max_output_tokens: int = 0,
+    max_output_tokens: int | None = None,
     context_window_tokens: int = 0,
     thinking: bool = False,
     reasoning_effort: str = "",

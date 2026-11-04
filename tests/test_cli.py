@@ -12,6 +12,7 @@ from mini_harness.cli import (
     Console,
     InteractiveCLI,
     ProfileStore,
+    ProfileStoreError,
     ProviderProfile,
     print_provider_catalog,
 )
@@ -205,8 +206,8 @@ async def test_choose_model_uses_preset_default_index(tmp_path: Path) -> None:
     assert any("请选择模型 [4]" in prompt for prompt in console.prompts)
 
 
-def test_profile_store_migrates_legacy_max_tokens(tmp_path: Path) -> None:
-    """旧配置中的 1024 默认值应迁移为 4096，避免长报告被截断。"""
+def test_profile_store_rejects_removed_max_tokens_without_changing_file(tmp_path: Path) -> None:
+    """旧字段明确报错，不能静默改写额度或丢弃配置。"""
     path = tmp_path / "config.json"
     path.write_text(
         json.dumps(
@@ -225,10 +226,10 @@ def test_profile_store_migrates_legacy_max_tokens(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    loaded = ProfileStore(path).load()
-
-    assert len(loaded) == 1
-    assert loaded[0].max_tokens == 4096
+    original = path.read_bytes()
+    with pytest.raises(ProfileStoreError, match="已移除字段 max_tokens"):
+        ProfileStore(path).load()
+    assert path.read_bytes() == original
 
 
 def test_profile_store_handles_null_base_url_and_non_utf8(tmp_path: Path) -> None:

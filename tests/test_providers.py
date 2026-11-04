@@ -23,8 +23,8 @@ from mini_harness.tools import AddTool, ToolRegistry
 
 
 def test_provider_config_defaults_allow_long_reports() -> None:
-    """默认 max_tokens 应足够生成一份项目总览 Markdown。"""
-    assert ProviderConfig(provider="custom").max_tokens == 4096
+    """配置只用 max_output_tokens 表达最大输出额度。"""
+    assert ProviderConfig(provider="custom").max_output_tokens == 4096
 
 
 def test_grouped_presets_cover_all_presets_and_huawei_models() -> None:

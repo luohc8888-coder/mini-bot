@@ -11,6 +11,7 @@ from typing import Any
 
 import httpx
 
+from .config import DEFAULT_MAX_OUTPUT_TOKENS, validate_max_output_tokens
 from .base import (
     LLMProvider,
     LLMResponse,
@@ -32,7 +33,7 @@ class AnthropicProvider(LLMProvider):
         base_url: str,
         model: str,
         temperature: float = 0.0,
-        max_tokens: int = 4096,
+        max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
         timeout: float = 60.0,
         extra_headers: dict[str, str] | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
@@ -48,7 +49,7 @@ class AnthropicProvider(LLMProvider):
             base_url: API Base URL，默认 ``https://api.anthropic.com/v1``。
             model: Claude 模型 ID。
             temperature: 采样温度。
-            max_tokens: 最大输出 token 数（Anthropic 必填）。
+            max_output_tokens: 配置的最大输出额度；协议层映射为 max_tokens。
             timeout: 单次请求超时秒数。
             extra_headers: 额外 HTTP 头。
             transport: 测试用 httpx transport。
@@ -61,7 +62,8 @@ class AnthropicProvider(LLMProvider):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.temperature = temperature
-        self.max_tokens = max_tokens
+        validate_max_output_tokens(max_output_tokens)
+        self.max_output_tokens = max_output_tokens
         self.timeout = timeout
         self.extra_headers = dict(extra_headers or {})
         self.transport = transport
@@ -202,7 +204,7 @@ class AnthropicProvider(LLMProvider):
         system, anthropic_messages = self._convert_messages(messages)
         payload: dict[str, Any] = {
             "model": self.model,
-            "max_tokens": self.max_tokens,
+            "max_tokens": self.output_token_limit,
             "temperature": self.temperature,
             "messages": anthropic_messages,
         }

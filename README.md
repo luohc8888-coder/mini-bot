@@ -377,7 +377,19 @@ mini-bot --interactive --context-window-tokens 1048576 --max-output-tokens 39321
 
 ### 输出长度
 
-`ProviderConfig.max_tokens` / `ProviderProfile.max_tokens` 作为兼容输出上限默认 4096；推荐在 profile 中配置 `max_output_tokens` 与 `context_window_tokens`，让 Governor 按同一请求预算动态决定实际 `max_tokens`。旧 `config.json` 中显式保存的 1024 会在加载时迁移为 4096。
+`ProviderConfig`、`ProviderProfile` 和 Provider 构造参数统一使用 `max_output_tokens`，
+默认 4096，必须为正整数。显式配置 1024 会保留 1024，不再自动升级；0 不表示
+默认值。命令行省略 `--max-output-tokens` 表示不覆盖已保存配置，显式传值必须大于 0。
+
+Provider 的 `max_output_tokens` 保存配置能力；`output_token_limit` 保存当前请求的
+有效额度，Governor 通过 `set_output_budget()` 更新后者，不修改配置上限，也不
+依赖首次请求时缓存的隐藏原值。协议适配器将有效额度映射到 API 的 `max_tokens`
+或 `max_completion_tokens`，这些协议字段不是本地配置字段。
+
+已移除本地配置的 `max_tokens` 字段。加载该字段或非法 `max_output_tokens` 会抛出
+`ProfileStoreError` 并在 CLI 显示修改提示，不修改磁盘或静默删除配置。手工更新
+旧文件时，保留正确的输出上限到 `max_output_tokens`，再删除 `max_tokens`；原先
+`max_output_tokens=0` 表示未设置的记录应改为明确的正整数。
 
 ## Session
 
@@ -745,7 +757,7 @@ uv run pytest -q
 | `tests/test_runner.py` | MockProvider、消息历史、tool_call_id 配对、max_iterations、预算耗尽收尾、System Prompt 隔离、参数校验、工具异常 |
 | `tests/test_e2e.py` | V0 完整 E2E 调用链、CLI 演示输出、Loop 正常退出与停止时序 |
 | `tests/test_providers.py` | 预设完整性、工厂构建、环境变量、OpenAI/Anthropic 请求响应转换、HTTP 错误 |
-| `tests/test_cli.py` / `tests/test_reasoning_settings.py` | Profile 存储与权限、API Key 持久化、默认配置、legacy max_tokens 迁移、多轮对话、模型切换、推理菜单保存/恢复/取消、实际请求参数更新与历史保留 |
+| `tests/test_cli.py` / `tests/test_reasoning_settings.py` / `tests/test_output_tokens_config.py` | Profile 存储与权限、默认配置、输出额度校验与协议映射、多轮对话、模型切换、推理菜单保存/恢复/取消、实际请求参数更新与历史保留 |
 | `tests/test_workspace.py` | 稳定 workspace_id、不同路径隔离、`../`、绝对路径和符号链接越界检查 |
 | `tests/test_session.py` | 缺失/损坏 JSON、Workspace 冲突、独立副本、清空、原子保存失败、tool_calls 持久化、单实例锁 |
 | `tests/test_session_integration.py` | Session 重启恢复、不同 Workspace 隔离、历史不重复、第二轮 Provider 入参精确包含 system/user/assistant/tool_calls/tool_result、持久化失败、预算耗尽收尾落盘、失败回合不落盘、CLI 命令 |
@@ -775,7 +787,7 @@ uv run pytest -q
 - [x] `/last-prompt` 展示 iteration、估算 Token、Compact 状态、工具消息数与真实 messages
 - [x] 默认 32 轮 Agent 预算、预算耗尽收尾
 - [x] OpenAI-compatible / Anthropic SSE 流式文本输出，`--no-stream` 可关闭
-- [x] `max_tokens` 默认 4096 与旧配置迁移
+- [x] 统一 `max_output_tokens` 配置，区分能力上限与单次请求额度
 - [x] 失败回合不写入 Session
 - [x] V0/V1 原有测试与上下文、命令执行、文件工具和开发闭环回归测试
 

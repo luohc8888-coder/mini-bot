@@ -124,7 +124,10 @@ def create_provider(config: ProviderConfig) -> LLMProvider:
         raise ProviderConfigurationError(str(exc)) from exc
 
     if preset.protocol == "mock":
-        return create_mock_provider()
+        provider = create_mock_provider()
+        provider.max_output_tokens = config.max_output_tokens
+        provider.context_window_tokens = config.context_window_tokens
+        return provider
 
     protocol = (config.protocol or preset.protocol).strip().lower()
     if protocol not in {"openai", "anthropic"}:
@@ -148,7 +151,7 @@ def create_provider(config: ProviderConfig) -> LLMProvider:
             base_url=base_url,
             model=model,
             temperature=config.temperature,
-            max_tokens=config.max_output_tokens or config.max_tokens,
+            max_output_tokens=config.max_output_tokens,
             timeout=config.timeout,
             extra_headers=extra_headers,
             provider_name=preset.display_name,
@@ -162,7 +165,7 @@ def create_provider(config: ProviderConfig) -> LLMProvider:
         base_url=base_url,
         model=model,
         temperature=config.temperature,
-        max_tokens=config.max_output_tokens or config.max_tokens,
+        max_output_tokens=config.max_output_tokens,
         timeout=config.timeout,
         extra_headers=extra_headers,
         provider_name=preset.display_name,

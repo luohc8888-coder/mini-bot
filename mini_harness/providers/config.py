@@ -4,6 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+DEFAULT_MAX_OUTPUT_TOKENS = 4096
+
+
+def validate_max_output_tokens(value: int) -> None:
+    """输出能力必须显式为正整数，0 不再承担“未配置”的含义。"""
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError("max_output_tokens 必须是正整数")
+
 
 @dataclass(slots=True)
 class ProviderConfig:
@@ -15,9 +23,8 @@ class ProviderConfig:
         api_key: 已解析的 API Key；为空时 factory 会尝试读取预设环境变量。
         base_url: 覆盖预设的 Base URL；为空时使用预设默认值。
         temperature: 采样温度。
-        max_tokens: 兼容旧配置的输出上限；未配置 ``max_output_tokens`` 时生效。
-        max_output_tokens: 模型/端点支持的最大输出 token 数；0 表示沿用
-            ``max_tokens``，可显式设为端点确认的上限（如 393216）。
+        max_output_tokens: 模型/端点允许的最大输出 token 数，必须为正整数，
+            默认 4096；实际每次请求额度由上下文剩余空间决定。
         context_window_tokens: 端点与模型的有效上下文窗口；0 表示由
             ContextConfig 决定。用于按 ``C - I - M`` 计算动态输出额度。
         timeout: HTTP 请求超时（秒）。
@@ -40,11 +47,13 @@ class ProviderConfig:
     api_key: str = ""
     base_url: str = ""
     temperature: float = 0.0
-    max_tokens: int = 4096
-    max_output_tokens: int = 0
+    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
     context_window_tokens: int = 0
     timeout: float = 60.0
     thinking: bool = False
     reasoning_effort: str = ""
     extra_headers: dict[str, str] = field(default_factory=dict)
     protocol: str = ""
+
+    def __post_init__(self) -> None:
+        validate_max_output_tokens(self.max_output_tokens)

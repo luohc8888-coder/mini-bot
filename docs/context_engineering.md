@@ -363,7 +363,11 @@ O_effective = min(O_max, C - I - M)
 available_input_tokens = C - O_effective - M
 ```
 
-`ProviderConfig.context_window_tokens` / `max_output_tokens`（以及 CLI 新 profile 的对应字段）提供模型能力；未知能力保留教学默认 `8192/1024`。动态 `O_effective` 同时写入本次 Provider payload 的 `max_tokens`，避免“本地预算通过但输入 + 实际输出超窗口”。
+`ProviderConfig.context_window_tokens` / `max_output_tokens` 提供模型能力，CLI 可覆盖
+新建或已保存的 profile。`max_output_tokens` 是唯一输出配置字段，默认 4096 且
+必须为正整数；未知窗口保留教学默认 `8192/1024`。动态 `O_effective` 通过
+`provider.set_output_budget()` 设置，由 `provider.output_token_limit` 读取，再由
+协议层映射为请求字段；`provider.max_output_tokens` 不随上下文压力改变。
 
 ### 6.2 预算分配
 

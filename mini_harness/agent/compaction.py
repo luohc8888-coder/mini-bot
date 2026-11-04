@@ -833,7 +833,7 @@ class ContextGovernor:
             "safety_margin": self.config.safety_margin_tokens,
         }
 
-    def _sync_provider_output_budget(self, input_tokens: int) -> int | None:
+    def _sync_provider_output_budget(self, input_tokens: int) -> int:
         """把“本次实际可发送的输出额度”同步给 Provider。
 
         请求预算与 Provider payload 必须来自同一个计算结果：
@@ -841,17 +841,7 @@ class ContextGovernor:
         只在每次请求前按真实估算输入调低本次实际发送的 max_tokens。
         """
         provider = self.provider
-        configured = getattr(provider, "max_tokens", None)
-        if not isinstance(configured, int) or configured <= 0:
-            return None
-        if not hasattr(provider, "_configured_max_output_tokens"):
-            try:
-                setattr(provider, "_configured_max_output_tokens", configured)
-            except (AttributeError, TypeError):
-                pass
-        base_max = int(
-            getattr(provider, "_configured_max_output_tokens", configured)
-        )
+        base_max = provider.max_output_tokens
         context_window = int(getattr(provider, "context_window_tokens", 0) or 0)
         if context_window <= 0:
             context_window = self.config.max_context_tokens
@@ -866,10 +856,7 @@ class ContextGovernor:
                 - self.config.safety_margin_tokens,
             ),
         )
-        try:
-            provider.max_tokens = effective
-        except (AttributeError, TypeError):
-            return None
+        provider.set_output_budget(effective)
         return effective
 
     def accept(self, accepted_message_count: int) -> None:

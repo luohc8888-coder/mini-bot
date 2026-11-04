@@ -8,6 +8,8 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
+from .config import DEFAULT_MAX_OUTPUT_TOKENS, validate_max_output_tokens
+
 # V0 的消息使用普通 Python dict，便于后续替换 Provider。assistant 消息中的
 # tool_calls 采用简化的 ``{id, name, arguments}`` 结构，而不是 OpenAI 的
 # ``type/function`` 完整包装；Runner 只依赖这层最小结构。
@@ -108,9 +110,25 @@ class LLMResponse:
 class LLMProvider(ABC):
     """LLM Provider 抽象接口。
 
-    V0 只定义最小能力：给定消息历史和工具定义，返回一个 LLMResponse。
-    MockProvider 实现该接口但不访问网络；未来可替换为真实 Provider。
+    给定消息历史和工具定义，返回一个 LLMResponse。max_output_tokens 声明
+    配置能力，ContextGovernor 用 set_output_budget 设置当前请求额度。
+    MockProvider 实现同一接口，但不访问网络。
     """
+
+    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
+    _request_output_limit: int | None = None
+
+    @property
+    def output_token_limit(self) -> int:
+        """当前请求额度；与配置的最大输出能力分开保存。"""
+        if self._request_output_limit is None:
+            return self.max_output_tokens
+        return min(self.max_output_tokens, self._request_output_limit)
+
+    def set_output_budget(self, value: int) -> None:
+        """ContextGovernor 在每次请求前设置有效输出额度。"""
+        validate_max_output_tokens(value)
+        self._request_output_limit = min(value, self.max_output_tokens)
 
     @abstractmethod
     async def chat(

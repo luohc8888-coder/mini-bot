@@ -267,9 +267,7 @@ class AgentRunner:
                 messages=deepcopy(provider_messages),
                 estimated_tokens=governed.estimated_tokens,
                 available_input_tokens=governed.available_input_tokens,
-                max_output_tokens=int(
-                    getattr(self.provider, "max_tokens", 0) or 0
-                ),
+                max_output_tokens=self.provider.output_token_limit,
                 accepted_message_count=governor.accepted_message_count,
                 compacted=governed.compacted,
                 compacted_message_count=governed.summarized_messages,

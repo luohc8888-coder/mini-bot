@@ -11,10 +11,15 @@ import os
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
-from mini_harness.providers.config import ProviderConfig
+from mini_harness.providers.config import (
+    DEFAULT_MAX_OUTPUT_TOKENS,
+    ProviderConfig,
+    validate_max_output_tokens,
+)
 
-DEFAULT_MAX_TOKENS = 4096
-_LEGACY_MAX_TOKENS = 1024
+
+class ProfileStoreError(ValueError):
+    """保存配置的字段不符合当前格式；禁止静默丢弃用户配置。"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,13 +34,15 @@ class ProviderProfile:
     model: str
     base_url: str = ""
     temperature: float = 0.0
-    max_tokens: int = DEFAULT_MAX_TOKENS
-    max_output_tokens: int = 0
+    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
     context_window_tokens: int = 0
     thinking: bool = False
     reasoning_effort: str = ""
     api_key: str = ""
     is_default: bool = False
+
+    def __post_init__(self) -> None:
+        validate_max_output_tokens(self.max_output_tokens)
 
     @classmethod
     def from_config(cls, name: str, config: ProviderConfig) -> "ProviderProfile":
@@ -46,7 +53,6 @@ class ProviderProfile:
             model=config.model,
             base_url=config.base_url or "",
             temperature=config.temperature,
-            max_tokens=config.max_tokens,
             max_output_tokens=config.max_output_tokens,
             context_window_tokens=config.context_window_tokens,
             thinking=config.thinking,
@@ -62,7 +68,6 @@ class ProviderProfile:
             api_key=api_key or self.api_key,
             base_url=self.base_url,
             temperature=self.temperature,
-            max_tokens=self.max_tokens,
             max_output_tokens=self.max_output_tokens,
             context_window_tokens=self.context_window_tokens,
             thinking=self.thinking,
@@ -91,7 +96,11 @@ class ProfileStore:
         self.path = path or default_profile_path()
 
     def load(self) -> list[ProviderProfile]:
-        """加载全部 profile；文件不存在或损坏时返回空列表。"""
+        """加载全部 profile；输出配置无效时明确报错，避免静默丢失配置。
+
+        文件不存在或无法解析时返回空列表；已移除字段与非法输出额度抛出
+        ProfileStoreError，不修改磁盘内容。
+        """
         if not self.path.exists():
             return []
         try:
@@ -116,6 +125,20 @@ class ProfileStore:
                 continue
             if not isinstance(model, str) or not model.strip():
                 continue
+            if "max_tokens" in item:
+                raise ProfileStoreError(
+                    f"配置 {name!r}（{self.path}）含已移除字段 max_tokens；"
+                    "请删除该字段，使用正整数 max_output_tokens。"
+                )
+            max_output_tokens = item.get(
+                "max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS
+            )
+            try:
+                validate_max_output_tokens(max_output_tokens)
+            except ValueError as exc:
+                raise ProfileStoreError(
+                    f"配置 {name!r}（{self.path}）：{exc}"
+                ) from exc
             raw_base_url = item.get("base_url")
             base_url = "" if raw_base_url is None else str(raw_base_url)
             raw_api_key = item.get("api_key")
@@ -125,21 +148,10 @@ class ProfileStore:
                 else str(raw_api_key).replace("\r", "").replace("\n", "").strip()
             )
             try:
-                raw_max_tokens = int(
-                    item.get("max_tokens", DEFAULT_MAX_TOKENS)
-                )
-                # 旧版默认值是 1024；显式保存的旧配置也按旧默认值迁移，
-                # 否则代码默认值改了但用户原来的 config.json 仍会被截断。
-                max_tokens = (
-                    DEFAULT_MAX_TOKENS
-                    if raw_max_tokens == _LEGACY_MAX_TOKENS
-                    else raw_max_tokens
-                )
-                raw_max_output = int(item.get("max_output_tokens", 0))
                 raw_context_window = int(
                     item.get("context_window_tokens", 0)
                 )
-                if raw_max_output < 0 or raw_context_window < 0:
+                if raw_context_window < 0:
                     continue
                 profiles.append(
                     ProviderProfile(
@@ -148,8 +160,7 @@ class ProfileStore:
                         model=model,
                         base_url=base_url,
                         temperature=float(item.get("temperature", 0.0)),
-                        max_tokens=max_tokens,
-                        max_output_tokens=raw_max_output,
+                        max_output_tokens=max_output_tokens,
                         context_window_tokens=raw_context_window,
                         thinking=bool(item.get("thinking", False)),
                         reasoning_effort=str(
@@ -208,7 +219,7 @@ class ProfileStore:
         return True
 
     def default_profile(self) -> ProviderProfile | None:
-        """返回默认 profile；没有显式默认时兼容只有一个 profile 的旧配置。"""
+        """返回显式默认配置；只有一个配置时自动选中。"""
         profiles = self.load()
         for profile in profiles:
             if profile.is_default:

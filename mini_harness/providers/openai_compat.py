@@ -12,6 +12,7 @@ from typing import Any
 
 import httpx
 
+from .config import DEFAULT_MAX_OUTPUT_TOKENS, validate_max_output_tokens
 from .base import (
     LLMProvider,
     LLMResponse,
@@ -69,7 +70,7 @@ class OpenAICompatibleProvider(LLMProvider):
         base_url: str,
         model: str,
         temperature: float = 0.0,
-        max_tokens: int = 4096,
+        max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
         timeout: float = 60.0,
         extra_headers: dict[str, str] | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
@@ -85,7 +86,7 @@ class OpenAICompatibleProvider(LLMProvider):
             base_url: API Base URL，例如 ``https://api.deepseek.com/v1``。
             model: 模型 ID。
             temperature: 采样温度。
-            max_tokens: 最大输出 token 数。
+            max_output_tokens: 配置的最大输出额度；请求额度可由预算治理调低。
             timeout: 单次请求超时秒数。
             extra_headers: 额外 HTTP 头。
             transport: 测试用 httpx transport；生产环境保持 None。
@@ -98,7 +99,8 @@ class OpenAICompatibleProvider(LLMProvider):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.temperature = temperature
-        self.max_tokens = max_tokens
+        validate_max_output_tokens(max_output_tokens)
+        self.max_output_tokens = max_output_tokens
         self.timeout = timeout
         self.extra_headers = dict(extra_headers or {})
         self.transport = transport
@@ -208,10 +210,10 @@ class OpenAICompatibleProvider(LLMProvider):
             "messages": [self._to_openai_message(message) for message in messages],
         }
         if self._uses_reasoning_parameters():
-            payload["max_completion_tokens"] = self.max_tokens
+            payload["max_completion_tokens"] = self.output_token_limit
         else:
             payload["temperature"] = self.temperature
-            payload["max_tokens"] = self.max_tokens
+            payload["max_tokens"] = self.output_token_limit
         if tools:
             payload["tools"] = tools
         if self.thinking:

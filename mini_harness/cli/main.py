@@ -94,8 +94,8 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--max-output-tokens",
-        type=int,
-        default=0,
+        type=_positive_output_tokens,
+        default=None,
         metavar="N",
         help="本次最大输出 Token（覆盖已保存配置；新建 profile 时保存）",
     )
@@ -153,6 +153,17 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     )
     parser.set_defaults(stream=True)
     return parser.parse_args(list(argv))
+
+
+def _positive_output_tokens(value: str) -> int:
+    """参数省略表示不覆盖；显式值必须为正整数。"""
+    try:
+        count = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("输出额度必须是正整数") from exc
+    if count <= 0:
+        raise argparse.ArgumentTypeError("输出额度必须是正整数")
+    return count
 
 
 async def main(argv: Sequence[str] | None = None) -> None:

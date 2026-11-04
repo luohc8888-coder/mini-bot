@@ -225,7 +225,7 @@ class ContextConfig:
     ) -> "ContextConfig":
         """按 Provider 声明的模型能力构造预算；未知能力保持兼容默认值。"""
         context_window = int(getattr(provider, "context_window_tokens", 0) or 0)
-        max_output = int(getattr(provider, "max_tokens", 0) or 0)
+        max_output = int(getattr(provider, "max_output_tokens", 0) or 0)
         if context_window <= 0:
             return fallback or cls()
         if max_output <= 0 or max_output >= context_window:
