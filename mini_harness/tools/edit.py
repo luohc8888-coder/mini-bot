@@ -47,11 +47,15 @@ def _read_bytes(target: Path) -> bytes:
     with target.open("rb") as handle:
         raw = handle.read(_MAX_EDIT_BYTES + 1)
     if len(raw) > _MAX_EDIT_BYTES:
-        raise _EditError(f"File too large to edit: {target}. Maximum is {_MAX_EDIT_BYTES} bytes.")
+        raise _EditError(
+            f"File too large to edit: {target}. "
+            f"Maximum is {_MAX_EDIT_BYTES} bytes."
+        )
     return raw
 
 
 def _load_buffer(target: Path, display_path: str) -> _FileBuffer:
+    """读取可编辑的 UTF-8 文本，并保留回滚所需原字节。"""
     if not target.exists():
         raise _EditError(f"File not found: {display_path}")
     if not target.is_file():
@@ -60,9 +64,13 @@ def _load_buffer(target: Path, display_path: str) -> _FileBuffer:
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
-        raise _EditError(f"Cannot edit non-UTF-8/binary file {display_path}: {exc}") from exc
+        raise _EditError(
+            f"Cannot edit non-UTF-8/binary file {display_path}: {exc}"
+        ) from exc
     if b"\x00" in raw:
-        raise _EditError(f"Cannot edit non-UTF-8/binary file {display_path}: NUL byte found")
+        raise _EditError(
+            f"Cannot edit non-UTF-8/binary file {display_path}: NUL byte found"
+        )
     content = text.replace("\r\n", "\n")
     return _FileBuffer(target, raw, content, content, b"\r\n" in raw)
 
@@ -84,18 +92,31 @@ def _replace(buffer: _FileBuffer, edit: dict[str, Any], label: str) -> int:
         raise _EditError(f"{label}.new_text must be different from old_text")
     count = buffer.content.count(old_text)
     if count == 0:
-        raise _EditError(f"{label}: old_text not found in {edit['path']}. Read the exact content with read_file first.")
+        raise _EditError(
+            f"{label}: old_text not found in {edit['path']}. "
+            "Read the exact content with read_file first."
+        )
     if count > 1 and not replace_all:
-        raise _EditError(f"{label}: old_text appears {count} times in {edit['path']}. Provide more context or set replace_all=true.")
+        raise _EditError(
+            f"{label}: old_text appears {count} times in {edit['path']}. "
+            "Provide more context or set replace_all=true."
+        )
     replaced = count if replace_all else 1
     size = len(buffer.content.encode("utf-8")) + replaced * (
         len(new_text.encode("utf-8")) - len(old_text.encode("utf-8"))
     )
     if buffer.uses_crlf:
-        size += buffer.content.count("\n") + replaced * (new_text.count("\n") - old_text.count("\n"))
+        size += buffer.content.count("\n") + replaced * (
+            new_text.count("\n") - old_text.count("\n")
+        )
     if size > _MAX_EDIT_BYTES:
-        raise _EditError(f"{label}: resulting file too large ({size} bytes). Maximum is {_MAX_EDIT_BYTES} bytes.")
-    buffer.content = buffer.content.replace(old_text, new_text, -1 if replace_all else 1)
+        raise _EditError(
+            f"{label}: resulting file too large ({size} bytes). "
+            f"Maximum is {_MAX_EDIT_BYTES} bytes."
+        )
+    buffer.content = buffer.content.replace(
+        old_text, new_text, -1 if replace_all else 1
+    )
     return replaced
 
 
@@ -104,7 +125,10 @@ def _commit(buffers: list[_FileBuffer]) -> int:
     changed = [b for b in buffers if b.content != b.original]
     for buffer in changed:
         if _read_bytes(buffer.target) != buffer.original_bytes:
-            raise _EditError(f"File changed while preparing edits: {buffer.target}. No files were written.")
+            raise _EditError(
+                f"File changed while preparing edits: {buffer.target}. "
+                "No files were written."
+            )
     attempted: list[_FileBuffer] = []
     try:
         for buffer in changed:
@@ -116,7 +140,9 @@ def _commit(buffers: list[_FileBuffer]) -> int:
         for previous in reversed(attempted):
             try:
                 if _read_bytes(previous.target) != previous.original_bytes:
-                    _atomic_write_text(previous.target, previous.original_bytes.decode("utf-8"))
+                    _atomic_write_text(
+                        previous.target, previous.original_bytes.decode("utf-8")
+                    )
             except (OSError, _EditError):
                 rollback_failed.append(str(previous.target))
         status = (
@@ -153,6 +179,7 @@ def _apply_edits(workspace: Workspace, edits: Any) -> _EditSummary:
 
 class EditFileTool(Tool):
     """对已有文本文件执行一次精确替换。"""
+
     name = "edit_file"
     description = (
         "在 Workspace 内的 UTF-8 文本/Markdown 文件中做精确字符串替换。"
@@ -188,10 +215,25 @@ class EditFileTool(Tool):
         self.workspace = workspace
 
     async def execute(
-        self, path: str | None = None, old_text: str | None = None,
-        new_text: str | None = None, replace_all: bool = False, **kwargs: Any,
+        self,
+        path: str | None = None,
+        old_text: str | None = None,
+        new_text: str | None = None,
+        replace_all: bool = False,
+        **kwargs: Any,
     ) -> ToolResult:
-        """编辑单个文件；使用与批量编辑完全一致的匹配和写入规则。"""
+        """编辑单个文件，使用与批量编辑一致的匹配和提交规则。
+
+        Args:
+            path: Workspace 内的现有文本文件。
+            old_text: 要精确匹配的原文，不含 read_file 的行号前缀。
+            new_text: 替换内容，空字符串表示删除匹配文本。
+            replace_all: 是否替换所有匹配；默认只接受唯一匹配。
+            **kwargs: 兼容工具接口的预留参数。
+
+        Returns:
+            成功摘要或结构化错误；不创建文件。
+        """
         if not path:
             return ToolResult.error("Error: path is required")
         if old_text is None:
@@ -199,17 +241,25 @@ class EditFileTool(Tool):
         if new_text is None:
             return ToolResult.error("Error: new_text is required")
         try:
-            result = _apply_edits(self.workspace, [{
-                "path": path, "old_text": old_text, "new_text": new_text,
-                "replace_all": replace_all,
-            }])
+            result = _apply_edits(self.workspace, [
+                {
+                    "path": path,
+                    "old_text": old_text,
+                    "new_text": new_text,
+                    "replace_all": replace_all,
+                }
+            ])
         except (_EditError, WorkspaceError, OSError, UnicodeError) as exc:
             return ToolResult.error(f"Error editing file: {exc}")
-        return ToolResult(content=f"Successfully edited {path}: replaced {result.replacements} occurrence(s).")
+        return ToolResult(content=(
+            f"Successfully edited {path}: replaced {result.replacements} "
+            "occurrence(s)."
+        ))
 
 
 class ApplyPatchTool(Tool):
     """一次执行同文件或跨文件的多个精确替换。"""
+
     name = "apply_patch"
     description = (
         "在 Workspace 内的 UTF-8 文本/Markdown 文件中按顺序应用多个精确替换。"
@@ -259,13 +309,24 @@ class ApplyPatchTool(Tool):
         self.workspace = workspace
 
     async def execute(self, edits: Any = None, **kwargs: Any) -> ToolResult:
-        """先校验全部 edits；提交失败时尝试回滚并报告仍可能改变的路径。"""
+        """先校验全部 edits；提交失败时尝试回滚。
+
+        Args:
+            edits: 按顺序叠加的 path/old_text/new_text/replace_all 对象列表。
+            **kwargs: 兼容工具接口的预留参数。
+
+        Returns:
+            编辑数量摘要，或包含提交/回滚状态的错误结果。
+            校验失败不会落盘；回滚失败会指出仍可能改变的路径。
+        """
         try:
             result = _apply_edits(self.workspace, edits)
         except (_EditError, WorkspaceError, OSError, UnicodeError) as exc:
             return ToolResult.error(f"Error applying patch: {exc}")
         if result.changed_files == 0:
-            return ToolResult(content=f"Successfully applied {len(edits)} edit(s); no net file changes.")
+            return ToolResult(content=(
+                f"Successfully applied {len(edits)} edit(s); no net file changes."
+            ))
         return ToolResult(content=(
             f"Successfully applied {len(edits)} edit(s) across {result.changed_files} file(s); "
             f"replaced {result.replacements} occurrence(s)."

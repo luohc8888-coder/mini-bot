@@ -224,10 +224,12 @@ path = workspace.resolve_path("README.md")  # /workspace/README.md
 
 ```text
 list_dir(path, recursive=False, max_entries=200)
+find_files(pattern, path=".", kind="file", max_results=200)
 grep(pattern, path=".", glob="*", max_matches=100)
 read_file(path, offset=1, limit=200)
 write_file(path, content, mode="overwrite")
 edit_file(path, old_text, new_text, replace_all=False)
+apply_patch(edits=[{"path": "app.py", "old_text": "before", "new_text": "after"}])
 file_info(path)
 ```
 
@@ -244,6 +246,13 @@ file_info(path)
 - 返回 `相对路径:行号: 命中行`
 - 支持 `glob` 过滤，例如 `*.py`
 - 默认最多返回 100 条命中
+
+`find_files`：
+
+- 按文件名或相对路径 glob 查找，例如 `*.py`、`src/**/*.py`
+- 支持 `kind="file"|"dir"|"any"`，默认最多返回 200 项
+- 禁止绝对模式和 `..`，过滤工作区外的链接，不递归目录符号链接
+- 与 `list_dir`、`grep` 共用遍历逻辑，在进入噪声目录之前剪枝
 
 `read_file`：
 
@@ -269,6 +278,25 @@ file_info(path)
 - `replace_all=true` 时替换所有匹配
 - 使用 `read_file` 读取精确文本后再编辑；新建/完整重写请用 `write_file`
 - 保留原文件的 CRLF/LF 换行风格和权限位
+
+`apply_patch` 接受多个精确替换的 `edits` 数组，不接收 unified diff。同一文件
+按数组顺序叠加，全部通过后才写入；单次和批量编辑共用同一套 UTF-8、匹配、
+换行和权限处理。输入及替换结果每文件最多 2 MiB，替换前先检查结果大小。
+写入阶段失败会尝试恢复原字节；恢复失败会明确报告仍可能改变的文件，不提供
+进程崩溃时的跨文件原子提交。
+
+工具实现按职责组织：
+
+| 模块 | 职责 |
+| --- | --- |
+| `tools/filesystem.py` | `read_file`、`write_file`、`file_info` |
+| `tools/search.py` | `list_dir`、`find_files`、`grep`，共享遍历、过滤和边界规则 |
+| `tools/edit.py` | `edit_file`、`apply_patch`，共享编辑与提交逻辑 |
+| `tools/_file_io.py` | 低层文件大小限制、保权限的原子写入，不依赖具体工具 |
+| `tools/command.py` | 命令执行及进程管理 |
+
+包级导入保持不变；`tools/patch.py` 和原 `tools/filesystem.py` 中的搜索类导入
+入口保留兼容，实际实现分别集中在 `edit.py`、`search.py`。
 
 文件工具只在 CLI 有 Workspace 时注册；V0 无 Workspace 的兼容调用仍只有 `AddTool`。文件工具需要真实 Provider 具备 tool calling 能力；内置 `MockProvider` 是预设脚本，默认 `mock-add-demo` 仍只会调用 `add`。
 
