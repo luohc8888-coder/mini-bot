@@ -138,6 +138,25 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         metavar="N",
         help="显式覆盖输出预留；0 表示使用模型配置",
     )
+    parser.add_argument(
+        "--idle-compact-after-minutes",
+        type=float,
+        default=None,
+        metavar="N",
+        help="Session 空闲多少分钟后后台压缩；0 关闭 Idle Compaction（默认 15）",
+    )
+    parser.add_argument(
+        "--dream-interval-hours",
+        type=float,
+        default=None,
+        metavar="N",
+        help="自动 Dream 检查间隔小时数（默认 2）",
+    )
+    parser.add_argument(
+        "--no-dream",
+        action="store_true",
+        help="本次运行关闭自动 Dream（/dream 手动整理仍可用）",
+    )
     stream_mode = parser.add_mutually_exclusive_group()
     stream_mode.add_argument(
         "--stream",
@@ -194,6 +213,9 @@ async def main(argv: Sequence[str] | None = None) -> None:
                 context_window_tokens=args.context_window_tokens,
                 thinking=args.thinking,
                 reasoning_effort=args.reasoning_effort,
+                idle_compact_after_minutes=args.idle_compact_after_minutes,
+                dream_interval_hours=args.dream_interval_hours,
+                no_dream=args.no_dream,
             )
         except WorkspaceError as exc:
             print(f"Workspace 错误：{exc}", file=sys.stderr)

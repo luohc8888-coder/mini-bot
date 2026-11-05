@@ -256,6 +256,13 @@ class InteractiveCLI:
         reasoning_effort: str = "",
         max_context_tokens: int = 0,
         reserve_output_tokens: int = 0,
+        memory_store: object | None = None,
+        session_compactor: object | None = None,
+        dream_manager: object | None = None,
+        maintenance_enabled: bool = True,
+        idle_compact_after_minutes: float | None = None,
+        dream_interval_hours: float | None = None,
+        dream_enabled: bool | None = None,
     ) -> None:
         """初始化 CLI 依赖。
 
@@ -269,6 +276,16 @@ class InteractiveCLI:
             context_config: V2 上下文预算配置；默认 ``ContextConfig()``。
             turn_timeout: 可选整轮等待秒数；None 表示不设固定整轮超时，
                 避免长生成已经成功保存却被 UI 误报 timeout。
+            memory_store: 可注入的 MemoryStore，便于测试；默认按 Workspace
+                创建 ``<workspace>/memory``。
+            session_compactor: 可注入的持久化压缩器；默认按当前 Provider
+                延迟创建。
+            dream_manager: 可注入的 Dream 管理器；默认按当前 Provider 延迟创建。
+            maintenance_enabled: 是否启动 Idle Compaction / Dream 后台任务；
+                测试可关闭以保持确定性。
+            idle_compact_after_minutes: 覆盖空闲压缩阈值；0 关闭。
+            dream_interval_hours: 覆盖自动 Dream 检查间隔小时数。
+            dream_enabled: 覆盖自动 Dream 开关；手动 ``/dream`` 不受影响。
         """
         self.console = console or Console()
         self.store = profile_store or ProfileStore()
@@ -306,6 +323,27 @@ class InteractiveCLI:
             self.session_manager = None
             self.workspace = None
 
+        # V2.2：长期记忆与持久化压缩运行态。Provider 在真正连接后绑定。
+        self.memory_store = memory_store
+        if self.memory_store is None and self.workspace is not None:
+            try:
+                from mini_harness.memory.store import MemoryStore
+
+                self.memory_store = MemoryStore(self.workspace)
+            except Exception:  # noqa: BLE001 - 记忆不可用不能阻止 CLI 启动
+                self.memory_store = None
+        self._session_compactor = session_compactor
+        self._dream_manager = dream_manager
+        self._maintenance_enabled = maintenance_enabled
+        self._idle_compact_after_minutes = idle_compact_after_minutes
+        self._dream_interval_hours = dream_interval_hours
+        self._dream_enabled = dream_enabled
+        self._maintenance_tasks: list[asyncio.Task] = []
+        self._idle_scheduler = None
+        self._dream_scheduler = None
+        self._active_session_key: str | None = None
+        self._active_provider: LLMProvider | None = None
+
         # 文件工具必须绑定固定的 Workspace，不能读取进程 cwd。
         if self.workspace is not None:
             file_workspace = WorkspaceResolver().resolve(self.workspace)
@@ -326,6 +364,7 @@ class InteractiveCLI:
                 self.workspace,
                 self.context_config,
                 tool_definitions=self.tools.get_definitions(),
+                memory_store=self.memory_store,
             )
             if self.workspace is not None
             else None
@@ -339,6 +378,205 @@ class InteractiveCLI:
         except EOFError:
             return False
         return answer.strip().lower() == "yes"
+
+    def _ensure_memory_runtime(self, provider: LLMProvider | None) -> None:
+        """按当前 Provider 创建/更新持久化压缩与 Dream 运行态。"""
+        if provider is not None:
+            self._active_provider = provider
+        if self.session_manager is None or self.memory_store is None:
+            return
+        try:
+            from mini_harness.agent.session_compaction import SessionCompactor
+            from mini_harness.memory.dream import DreamConfig, DreamManager
+        except Exception:  # noqa: BLE001 - 新增模块不可用时保持基础对话
+            return
+
+        if self._session_compactor is None:
+            self._session_compactor = SessionCompactor(
+                self._active_provider,
+                self.session_manager,
+                memory_store=self.memory_store,
+                context_config=self.context_config,
+            )
+        else:
+            if self._active_provider is not None:
+                self._session_compactor.provider = self._active_provider
+            if getattr(self._session_compactor, "context_config", None) is not None:
+                self._session_compactor.context_config = self.context_config
+
+        if self._dream_manager is None:
+            self._dream_manager = DreamManager(
+                self._active_provider,
+                self.memory_store,
+                DreamConfig(
+                    enabled=(
+                        self.context_config.dream_enabled
+                        if self._dream_enabled is None
+                        else self._dream_enabled
+                    ),
+                    interval_hours=(
+                        self.context_config.dream_interval_hours
+                        if self._dream_interval_hours is None
+                        else self._dream_interval_hours
+                    ),
+                    max_entries=self.context_config.dream_max_entries,
+                ),
+            )
+        elif self._active_provider is not None:
+            self._dream_manager.provider = self._active_provider
+
+    def _bind_memory_provider(self, provider: LLMProvider) -> None:
+        """Provider 切换后同步后台压缩与 Dream，避免使用旧连接。"""
+        self._ensure_memory_runtime(provider)
+
+    def _start_maintenance(self) -> None:
+        """启动 Idle Compaction 与 Dream 后台任务（同一个 CLI 生命周期）。"""
+        if (
+            not self._maintenance_enabled
+            or self.session_manager is None
+            or self.memory_store is None
+        ):
+            return
+        if self._maintenance_tasks:
+            return
+        self._ensure_memory_runtime(self._active_provider)
+        try:
+            from mini_harness.agent.maintenance import IdleCompactionScheduler
+            from mini_harness.memory.dream import DreamScheduler
+        except Exception:  # noqa: BLE001 - 后台维护不可用不能阻止聊天
+            return
+
+        config = self.context_config
+        idle_after_minutes = (
+            config.idle_compact_after_minutes
+            if self._idle_compact_after_minutes is None
+            else self._idle_compact_after_minutes
+        )
+        dream_enabled = (
+            config.dream_enabled
+            if self._dream_enabled is None
+            else self._dream_enabled
+        )
+        dream_interval_hours = (
+            config.dream_interval_hours
+            if self._dream_interval_hours is None
+            else self._dream_interval_hours
+        )
+        if (
+            self._session_compactor is not None
+            and idle_after_minutes > 0
+            and config.idle_compact_check_interval_seconds > 0
+        ):
+            self._idle_scheduler = IdleCompactionScheduler(
+                self._session_compactor,
+                self.session_manager,
+                idle_after_minutes=idle_after_minutes,
+                check_interval_seconds=config.idle_compact_check_interval_seconds,
+            )
+            task = self._idle_scheduler.start()
+            if task is not None:
+                self._maintenance_tasks.append(task)
+
+        if self._dream_manager is not None and dream_enabled:
+            self._dream_scheduler = DreamScheduler(
+                self._dream_manager,
+                interval_hours=dream_interval_hours,
+                run_on_start=True,
+            )
+            task = self._dream_scheduler.start()
+            if task is not None:
+                self._maintenance_tasks.append(task)
+
+    async def _stop_maintenance(self) -> None:
+        """停止后台维护任务，确保 CLI 退出时没有悬挂协程。"""
+        for scheduler in (self._idle_scheduler, self._dream_scheduler):
+            if scheduler is not None:
+                try:
+                    await scheduler.stop()
+                except Exception:  # noqa: BLE001 - 退出清理不应掩盖主错误
+                    pass
+        tasks = [task for task in self._maintenance_tasks if not task.done()]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._maintenance_tasks.clear()
+        self._idle_scheduler = None
+        self._dream_scheduler = None
+
+    async def _handle_compact_command(self) -> None:
+        """处理 ``/compact``：不依赖 Token 阈值与空闲时间。"""
+        if self.session_manager is None or self.memory_store is None:
+            self.console.write("当前没有可压缩的 Session。")
+            return
+        self._ensure_memory_runtime(self._active_provider)
+        if self._session_compactor is None:
+            self.console.write("压缩功能不可用：SessionCompactor 未初始化。")
+            return
+        try:
+            result = await self._session_compactor.compact(reason="manual")
+        except Exception as exc:  # noqa: BLE001 - 命令错误不能打崩 CLI
+            self.console.write_error(f"压缩失败：{type(exc).__name__}: {exc}")
+            return
+        status = getattr(result, "status", "failed")
+        if status == "compacted":
+            message = (
+                f"压缩成功：已归档 {result.summarized_messages} 条历史，"
+                f"Summary 已保存（边界 {result.boundary}，"
+                f"checkpoint {result.checkpoint_id or '无'}）。"
+            )
+            if getattr(result, "archive_cursor", None) is not None:
+                message += f" Memory Archive cursor={result.archive_cursor}。"
+            if getattr(result, "error", None):
+                message += f" 归档提示：{result.error}"
+            self.console.write(message)
+            return
+        if status == "nothing_to_compact":
+            if getattr(result, "archive_cursor", None) is not None:
+                self.console.write(
+                    "没有新的未归档历史；已补归档 Summary 到 Memory Archive"
+                    f"（cursor={result.archive_cursor}）。"
+                )
+            else:
+                self.console.write("没有新的未归档历史，无需压缩。")
+            return
+        if status == "busy":
+            self.console.write("当前 Session 正在压缩，请稍后再试。")
+            return
+        self.console.write_error(
+            f"压缩失败：{getattr(result, 'error', None) or '未知原因'}"
+        )
+
+    async def _handle_dream_command(self) -> None:
+        """处理 ``/dream``：手动触发长期记忆整理。"""
+        if self.session_manager is None or self.memory_store is None:
+            self.console.write("当前没有可用的长期记忆存储。")
+            return
+        self._ensure_memory_runtime(self._active_provider)
+        if self._dream_manager is None:
+            self.console.write("Dream 不可用：DreamManager 未初始化。")
+            return
+        try:
+            result = await self._dream_manager.run()
+        except Exception as exc:  # noqa: BLE001 - 命令错误不能打崩 CLI
+            self.console.write_error(f"Dream 失败：{type(exc).__name__}: {exc}")
+            return
+        if getattr(result, "busy", False):
+            self.console.write("Dream 正在运行，请稍后再试。")
+            return
+        if getattr(result, "error", None):
+            self.console.write_error(f"Dream 失败：{result.error}")
+            return
+        if result.processed_entries <= 0:
+            self.console.write("没有待处理的归档摘要，Dream 已跳过（未调用模型）。")
+            return
+        self.console.write(
+            f"Dream 完成：处理 {result.processed_entries} 条归档摘要，"
+            f"新增 {result.added} 条、更新 {result.updated} 条、"
+            f"删除 {result.removed} 条、跳过 {result.skipped} 条；"
+            f"cursor={result.cursor}，"
+            f"MEMORY.md {'已更新' if result.memory_updated else '无变化'}。"
+        )
 
     async def run(self) -> None:
         """运行配置选择与聊天主循环。"""
@@ -372,10 +610,15 @@ class InteractiveCLI:
                             self.console.write(f"配置错误：{exc}")
                             continue
 
-                        should_switch = await self._chat_loop(
-                            provider,
-                            selection,
-                        )
+                        self._ensure_memory_runtime(provider)
+                        self._start_maintenance()
+                        try:
+                            should_switch = await self._chat_loop(
+                                provider,
+                                selection,
+                            )
+                        finally:
+                            await self._stop_maintenance()
                         if not should_switch:
                             self.console.write("已退出。")
                             return
@@ -394,6 +637,10 @@ class InteractiveCLI:
             self.console.write(f"Session: {self.session_manager.session_key}")
             self.console.write(f"History: {len(session.messages)} messages")
             self.console.write(f"Loaded messages: {len(session.messages)}")
+            if session.summary:
+                self.console.write(
+                    f"Summary: 已归档 {session.summary_boundary} 条历史"
+                )
             self.console.write(
                 f"Context budget: {self.context_config.available_input_tokens} "
                 f"input tokens (max {self.context_config.max_context_tokens}, "
@@ -402,6 +649,7 @@ class InteractiveCLI:
             self.console.write(f"配置文件：{self.store.path}")
             self.console.write(
                 "输入 /help 查看命令；输入 /context 查看上下文预算；"
+                "输入 /compact 压缩历史；输入 /dream 整理长期记忆；"
                 "输入 /exit 退出。"
             )
             return
@@ -668,6 +916,8 @@ class InteractiveCLI:
         self.context_config = self._effective_context_config(selection)
         if self.context_builder is not None:
             self.context_builder.config = self.context_config
+        if self._session_compactor is not None:
+            self._session_compactor.context_config = self.context_config
         self.console.write(
             f"模型预算：上下文 {self.context_config.max_context_tokens} tokens，"
             f"输入预算 {self.context_config.available_input_tokens}，"
@@ -818,9 +1068,11 @@ class InteractiveCLI:
         )
         self.console.write(
             "命令：/model 切换厂商或模型  /settings 推理设置  /history 查看历史  "
-            "/context 查看上下文  /last-prompt 查看上次请求  "
-            "/clear 清空 Session  /tools 查看工具  /help 帮助  /exit 退出"
+            "/context 查看上下文  /compact 压缩历史  /dream 整理长期记忆  "
+            "/last-prompt 查看上次请求  /clear 清空 Session  /tools 查看工具  "
+            "/help 帮助  /exit 退出"
         )
+        self._ensure_memory_runtime(provider)
 
         while True:
             try:
@@ -840,15 +1092,24 @@ class InteractiveCLI:
                     "/model 或 /config 切换 Provider/模型（Session 历史保留）；"
                     "/settings 设置并保存当前模型的推理强度；"
                     "/history 查看当前 Session；/context 查看模型上下文与预算；"
+                    "/compact 立即压缩当前 Session 的未归档历史；"
+                    "/dream 立即整理长期记忆（与自动 Dream 互斥）；"
                     "/last-prompt 查看上一次发给模型的完整请求消息；"
-                    "/clear 清空当前 Session；/tools 查看已注册工具；"
+                    "/clear 清空当前 Session（不清空长期记忆）；/tools 查看已注册工具；"
                     "/exit 退出。"
                 )
+                continue
+            if command == "/compact":
+                await self._handle_compact_command()
+                continue
+            if command == "/dream":
+                await self._handle_dream_command()
                 continue
             if command == "/settings":
                 updated = await self._edit_reasoning_settings(selection)
                 if updated is not None:
                     provider, selection = updated
+                    self._bind_memory_provider(provider)
                 continue
             if command == "/history":
                 self._print_history()
@@ -891,6 +1152,7 @@ class InteractiveCLI:
                 provider = new_provider
                 selection = new_selection
                 self._activate_selection(selection)
+                self._bind_memory_provider(provider)
                 self.console.write(
                     f"已切换：{selection.preset.display_name} / "
                     f"{selection.config.model}"
@@ -966,6 +1228,24 @@ class InteractiveCLI:
             compact_soft_ratio=base.compact_soft_ratio,
             max_tool_result_tokens=base.max_tool_result_tokens,
             enable_auto_compact=base.enable_auto_compact,
+            memory_max_tokens=base.memory_max_tokens,
+            idle_compact_after_minutes=(
+                base.idle_compact_after_minutes
+                if self._idle_compact_after_minutes is None
+                else self._idle_compact_after_minutes
+            ),
+            idle_compact_check_interval_seconds=base.idle_compact_check_interval_seconds,
+            dream_enabled=(
+                base.dream_enabled
+                if self._dream_enabled is None
+                else self._dream_enabled
+            ),
+            dream_interval_hours=(
+                base.dream_interval_hours
+                if self._dream_interval_hours is None
+                else self._dream_interval_hours
+            ),
+            dream_max_entries=base.dream_max_entries,
         )
 
     async def _run_session_turn(
@@ -997,6 +1277,10 @@ class InteractiveCLI:
             resolver(selection) if callable(resolver) else self.context_config
         )
         self.context_config = effective_context
+        if self._session_compactor is not None and getattr(
+            self._session_compactor, "context_config", None
+        ) is not None:
+            self._session_compactor.context_config = effective_context
         builder = getattr(self, "context_builder", None)
         if builder is not None:
             builder.config = effective_context
@@ -1010,9 +1294,23 @@ class InteractiveCLI:
             session_manager=self.session_manager,
             context_builder=self.context_builder,
             context_config=self.context_config,
+            memory_store=self.memory_store,
             on_text_delta=on_text_delta,
             on_tool_start=on_tool_start,
         )
+        session_key = (
+            self.session_manager.session_key
+            if self.session_manager is not None
+            else None
+        )
+        if self._idle_scheduler is not None and session_key is not None:
+            self._idle_scheduler.mark_active(session_key)
+            # 若空闲压缩已持有检查锁（可能正在生成摘要），等它完成后再读
+            # Session，避免新回合与压缩互相覆盖。
+            try:
+                await self._idle_scheduler.wait_for_check_completion()
+            except Exception:  # noqa: BLE001 - 调度器异常不能阻止用户回合
+                pass
         loop_task = asyncio.create_task(agent_loop.run())
         try:
             await bus.publish_inbound(
@@ -1034,6 +1332,8 @@ class InteractiveCLI:
             # 在 120 秒被误报为失败。需要总时限的调用方显式传 turn_timeout。
             return await bus.consume_outbound()
         finally:
+            if self._idle_scheduler is not None and session_key is not None:
+                self._idle_scheduler.mark_inactive(session_key)
             agent_loop.stop()
             await loop_task
 
@@ -1046,8 +1346,17 @@ class InteractiveCLI:
             return
         if not session.messages:
             self.console.write("当前 Session 历史为空。")
+            if session.summary:
+                self.console.write(
+                    f"当前 Summary 已覆盖 {session.summary_boundary} 条历史。"
+                )
             return
         self.console.write(f"当前 Session 历史（{len(session.messages)} 条）：")
+        if session.summary:
+            self.console.write(
+                f"  [Summary] 已归档前 {session.summary_boundary} 条历史，"
+                f"摘要约 {len(session.summary)} 字符；原始历史仍完整保留。"
+            )
         for index, message in enumerate(session.messages, start=1):
             role = str(message.get("role", "unknown"))
             content = message.get("content")
@@ -1077,7 +1386,11 @@ class InteractiveCLI:
             self.console.write_error(f"Session 加载失败：{exc}")
             return
         try:
-            stats = self.context_builder.inspect(session.messages)
+            stats = self.context_builder.inspect(
+                session.messages,
+                summary=session.summary,
+                summary_boundary=session.summary_boundary,
+            )
         except (ContextBudgetExceeded, ValueError) as exc:
             self.console.write_error(f"上下文统计失败：{exc}")
             return
@@ -1099,6 +1412,17 @@ class InteractiveCLI:
         )
         self.console.write(
             f"工具定义：{stats.tool_schema_tokens} 估算 Token"
+        )
+        self.console.write(
+            f"长期记忆：{stats.long_term_memory_status}"
+            f"（{stats.long_term_memory_tokens} 估算 Token）"
+        )
+        self.console.write(
+            f"Session Summary：{stats.summary_tokens} 估算 Token"
+            f"（已归档边界 {stats.summary_boundary} 条）"
+        )
+        self.console.write(
+            f"未归档历史：{stats.unarchived_message_count} 条"
         )
         self.console.write(
             f"安全余量：{stats.safety_margin_tokens} 估算 Token"
@@ -1406,6 +1730,9 @@ async def run_interactive_cli(
     context_window_tokens: int = 0,
     thinking: bool = False,
     reasoning_effort: str = "",
+    idle_compact_after_minutes: float | None = None,
+    dream_interval_hours: float | None = None,
+    no_dream: bool = False,
 ) -> None:
     """启动 V2 交互式 CLI。
 
@@ -1420,6 +1747,9 @@ async def run_interactive_cli(
         context_window_tokens: 本次覆盖模型上下文窗口，新建 profile 时保存。
         thinking: 本次显式开启 thinking，新建 profile 时保存。
         reasoning_effort: 本次覆盖推理档位，新建 profile 时保存。
+        idle_compact_after_minutes: 覆盖空闲压缩阈值；0 关闭。
+        dream_interval_hours: 覆盖自动 Dream 间隔小时数。
+        no_dream: 关闭自动 Dream（手动 /dream 不受影响）。
     """
     await InteractiveCLI(
         workspace=workspace if workspace is not None else Path.cwd(),
@@ -1432,4 +1762,7 @@ async def run_interactive_cli(
         context_window_tokens=context_window_tokens,
         thinking=thinking,
         reasoning_effort=reasoning_effort,
+        idle_compact_after_minutes=idle_compact_after_minutes,
+        dream_interval_hours=dream_interval_hours,
+        dream_enabled=False if no_dream else None,
     ).run()

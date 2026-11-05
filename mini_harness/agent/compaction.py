@@ -83,6 +83,8 @@ class CompactionOutcome:
     error: str | None = None
     # Compact 后受保护 Delta 的起始索引（相对 outcome.messages）。
     protected_start: int | None = None
+    # 纯摘要正文（不含包装提示），供持久化 Session Summary 使用。
+    summary_text: str | None = None
 
 
 @dataclass(slots=True)
@@ -572,6 +574,7 @@ class ContextCompactor:
             summary_message=summary_message,
             summary_tokens=estimate_tokens(summary),
             protected_start=len(system_prefix) + 1,
+            summary_text=summary,
         )
 
     def _build_transcript(

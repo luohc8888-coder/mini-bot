@@ -44,6 +44,9 @@ class AgentLoop:
             ``runner.tools.get_definitions()`` 自动创建一个。
         context_config: 自动创建 ContextBuilder 时使用的预算配置；默认
             ``ContextConfig()``。
+        memory_store: 可选的 MemoryStore。传入时 ContextBuilder 会把
+            ``MEMORY.md`` 注入 System Prompt；不传且启用 Session 时自动创建
+            ``<workspace>/memory`` 下的默认 MemoryStore。
 
     上下游:
         main.py 创建并 ``asyncio.create_task(agent_loop.run())``；CLI 通过
@@ -63,6 +66,7 @@ class AgentLoop:
         session_manager: SessionManager | None = None,
         context_builder: ContextBuilder | None = None,
         context_config: ContextConfig | None = None,
+        memory_store: object | None = None,
         on_text_delta: TextDeltaCallback | None = None,
         on_tool_start: ToolStartCallback | None = None,
     ) -> None:
@@ -74,6 +78,19 @@ class AgentLoop:
         self._session_manager = session_manager
         self._context_builder = context_builder
         self._context_config = context_config
+        self._memory_store = memory_store
+        if (
+            self._memory_store is None
+            and session_manager is not None
+        ):
+            # 延迟导入：memory 包与 session/agent 包互相独立，避免模块
+            # 加载期的循环依赖。
+            try:
+                from mini_harness.memory.store import MemoryStore
+
+                self._memory_store = MemoryStore(session_manager.workspace)
+            except Exception:  # noqa: BLE001 - 记忆不可用不能阻止基础对话
+                logger.exception("初始化长期记忆存储失败，本轮不注入 Memory")
         if self._context_builder is None and session_manager is not None:
             # V2 只在 Session 模式构建上下文；V0 的 demo 路径继续保持
             # “单条 user 消息直接交给 Runner”的兼容行为。
@@ -86,7 +103,12 @@ class AgentLoop:
                 session_manager.workspace,
                 effective_context_config,
                 tool_definitions=runner.tools.get_definitions(),
+                memory_store=self._memory_store,
             )
+        elif self._context_builder is not None and self._memory_store is not None:
+            # 注入的 Builder 也要共享 MemoryStore，保证 /context 与真实请求一致。
+            if getattr(self._context_builder, "memory_store", None) is None:
+                self._context_builder.memory_store = self._memory_store
         self._on_text_delta = on_text_delta
         self._on_tool_start = on_tool_start
         self._running = False
@@ -252,7 +274,12 @@ class AgentLoop:
             )
 
         try:
-            built = builder.build_context(history, current_message)
+            built = builder.build_context(
+                history,
+                current_message,
+                summary=session.summary,
+                summary_boundary=session.summary_boundary,
+            )
         except ContextBudgetExceeded as exc:
             # 超预算不截断当前输入、不清空历史、不调用 Provider。
             return self._error_outbound(
@@ -421,6 +448,9 @@ class AgentLoop:
                         deepcopy(current_message),
                         *deepcopy(partial_new),
                     ],
+                    summary=session.summary,
+                    summary_boundary=session.summary_boundary,
+                    summary_checkpoint_id=session.summary_checkpoint_id,
                 )
             )
         except Exception:  # noqa: BLE001 - 保存失败不能掩盖原始预算错误
@@ -443,6 +473,9 @@ class AgentLoop:
                         deepcopy(current_message),
                         *deepcopy(new_messages),
                     ],
+                    summary=session.summary,
+                    summary_boundary=session.summary_boundary,
+                    summary_checkpoint_id=session.summary_checkpoint_id,
                 )
             )
         except Exception:  # noqa: BLE001 - 保存失败不能掩盖原始失败

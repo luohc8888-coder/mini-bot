@@ -16,11 +16,14 @@ from .context import (
     ContextError,
     ContextStats,
     ProviderRequestSnapshot,
+    build_session_summary_message,
     estimate_tokens,
 )
 from .loop import AgentLoop
+from .maintenance import IdleCompactionScheduler
 from .prompt import build_system_prompt
 from .runner import AgentRunResult, AgentRunSpec, AgentRunner
+from .session_compaction import PersistentCompactionResult, SessionCompactor
 
 __all__ = [
     "AgentLoop",
@@ -37,8 +40,12 @@ __all__ = [
     "ContextGovernor",
     "ContextStats",
     "GovernedRequest",
+    "IdleCompactionScheduler",
+    "PersistentCompactionResult",
     "ProviderRequestSnapshot",
     "SUMMARY_SYSTEM_PROMPT",
+    "SessionCompactor",
+    "build_session_summary_message",
     "build_system_prompt",
     "estimate_tokens",
     "truncate_tool_results",

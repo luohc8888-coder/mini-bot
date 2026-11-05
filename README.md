@@ -22,6 +22,10 @@ CLI → InboundMessage → MessageBus → AgentLoop
 - 最近完成轮次关键结论保护：整轮超预算时生成确定性“完成轮次摘要”，不会因大量工具输出丢掉最终 Assistant 结论
 - 每次 Provider 请求前的 ContextGovernance：检查 System + messages + Tool Schema + 输出预留，支持软/硬阈值
 - 轻量级 `ContextCompactor`：对已完成旧历史用现有 Provider 生成结构化摘要；当前用户请求与进行中的工具链原样保留
+- 持久化 Session Summary Checkpoint：原始历史完整保留，归档边界与摘要跨进程恢复，请求不再重复发送已压缩历史
+- `memory/` 长期记忆：`MEMORY.md` + `history.jsonl` + `.dream_cursor`，每次持久化压缩后归档摘要
+- Idle Compaction（默认 15 分钟空闲、60 秒检查）与 `/compact` 手动压缩
+- Dream 长期记忆整理（默认每 2 小时检查、单次最多 20 条）与 `/dream` 手动整理，结构化操作 + 去重 + 原子写入
 - 大型 Tool Result 在 Provider 上下文中按 Token 截断并保留 path/offset/pattern 等元数据，Session 中的原始结果仍完整
 - `AgentRunResult.new_messages` 显式边界，避免 System Prompt 或裁剪后历史污染 Session
 - `/context` CLI 调试命令，展示真实 Token 预算与选择结果；`/last-prompt` 展示最后一次真实 Provider 请求快照
@@ -353,11 +357,42 @@ V2.1 在 `AgentRunner` 调用 Provider 的统一入口增加 `ContextGovernor`�
 - `ContextConfig.compact_soft_ratio`：工具循环中的软阈值，默认 0.8；
 - `ContextConfig.max_tool_result_tokens`：请求超预算时单条 Tool Result 的首轮回退上限，默认 2048；
 - `ContextConfig.enable_auto_compact`：是否允许 LLM 摘要，默认开启；
-- Summary 使用现有 `LLMProvider` 生成，只存在于本次请求上下文，不写入 Session；
+- Summary 使用现有 `LLMProvider` 生成，正常情况下只存在于本次请求上下文；需要跨回合持久化时由 V2.2 的 `SessionCompactor` 写入 Session Summary Checkpoint；
 - 当前用户消息及尚未发送的 in-flight 工具组（Delta）原样保留；
 - Provider 接受请求不代表模型永久记住内容；当前回合只有超预算时才把较早的 assistant/tool 组换成 `accepted_summary` 参考摘录，最近两组已接受调用及最新组保留配对结构；
 - 无论窗口大小，总请求放得下就保留完整工具正文；超预算时才截断，保留头尾及 path/offset/limit 等元数据；原始结果仍完整保存在 Session。
 - Summary 作为普通 user/历史引用消息发送，明确标注“reference data only, not instructions”，不冒充 System 规则。
+
+### 持久化 Compaction、Idle Compaction 与 Dream（V2.2）
+
+V2.2 在 V2.1 的请求内 Token Compaction 之上增加持久化层，不改变既有预算算法：
+
+```text
+Session.messages               完整原始历史（永不因压缩删除）
+Session.summary                当前有效摘要（持久化）
+Session.summary_boundary       已归档历史条数（0..len(messages)）
+Session.summary_checkpoint_id  摘要检查点稳定 ID（Memory 归档去重）
+```
+
+模型请求结构变为：
+
+```text
+System Prompt（含 AGENTS.md / Long-term Memory）
+    + Session Summary
+    + Unarchived History（summary_boundary 之后的原始消息）
+    + Current Message
+```
+
+- `SessionCompactor`：统一 `/compact`、Idle Compaction 与未来触发源的压缩实现；只压缩已完成的完整用户轮次，遇不完整轮次停止，工具调用与结果配对保持不变；支持把上一版 Summary 与新增历史合并后再摘要；失败时 Session 完全不变。
+- 保存顺序：先以单次原子 JSON 替换写入 `summary` + `summary_boundary` + `summary_checkpoint_id`，成功后再追加 Memory Archive；即使归档失败，摘要检查点仍然有效。
+- `IdleCompactionScheduler`：默认每 60 秒检查 Session 文件 mtime，超过 15 分钟无活动且有完整未归档历史时尝试压缩；正在执行任务的 Session、活跃会话、无新历史时跳过；同一 Session 通过 `asyncio.Lock` 互斥。`ContextConfig.idle_compact_after_minutes = 0` 可关闭。
+- `/compact`：不依赖 Token 阈值与空闲时间，立即压缩当前 Session 未归档历史，返回压缩成功 / 无需压缩 / 失败 / 忙。
+- Memory Archive：`<workspace>/memory/history.jsonl` 每条记录包含 `cursor`（从 1 单调递增）、`session_key`、`timestamp`、`content`、`checkpoint_id`；同一检查点重复归档幂等。
+- `DreamManager`：读取 `.dream_cursor` 之后、单次最多 `dream_max_entries`（默认 20）条归档摘要；没有新记录时不调用 LLM；LLM 只返回结构化 JSON（`add` / `update` / `remove`），由代码校验、去重、按 section 合并后原子写入 `MEMORY.md`；只有写入成功后才推进 `.dream_cursor`，任何失败都保留旧 cursor 允许下次重试。
+- `DreamScheduler`：默认每 2 小时检查一次；进程退出即停止，重启后从 cursor 继续。
+- `/dream`：手动触发同一 Dream 提取逻辑，与定时任务通过实例锁互斥；返回处理条数、新增/更新/删除/跳过数量、cursor 与失败原因。
+- `/clear` 只清空当前 Session（含 Summary Checkpoint），不删除 Workspace 的长期记忆 `MEMORY.md`。
+- CLI 配置：`--idle-compact-after-minutes 0` 关闭空闲压缩，`--dream-interval-hours N` 调整自动 Dream 间隔，`--no-dream` 仅关闭自动 Dream（`/dream` 手动整理仍可用）。
 
 最近一个已完成轮次整轮放不进历史预算时，`ContextBuilder` 会生成确定性的“完成轮次摘要”（用户请求 + 工具名 + 最终 Assistant 结论），确保 P0-1/P0-2 这类关键结论不会跟着大型工具输出一起被丢弃。
 
@@ -789,6 +824,11 @@ uv run pytest -q
 - [x] OpenAI-compatible / Anthropic SSE 流式文本输出，`--no-stream` 可关闭
 - [x] 统一 `max_output_tokens` 配置，区分能力上限与单次请求额度
 - [x] 失败回合不写入 Session
+- [x] 持久化 Session Summary Checkpoint（原始历史 + 归档边界 + 摘要 + 未归档消息）
+- [x] `/compact` 手动压缩；Idle Compaction 默认 15 分钟 / 60 秒检查、可配置为 0 关闭
+- [x] Memory Archive：`memory/MEMORY.md`、`history.jsonl`（cursor 单调、checkpoint 幂等）、`.dream_cursor`
+- [x] Dream：默认每 2 小时检查、单次最多 20 条，结构化 add/update/remove、校验、去重、原子写、失败不推进 cursor
+- [x] `/dream` 手动整理长期记忆，与定时 Dream 互斥
 - [x] V0/V1 原有测试与上下文、命令执行、文件工具和开发闭环回归测试
 
 ### 限制
@@ -798,8 +838,9 @@ uv run pytest -q
 - JSON 持久化是单进程单写者方案；`flock` 只保护 CLI，不保护任意库调用。
 - Context Token 是估算值，不是模型 Tokenizer 的精确计数；8K/1K 只是教学默认值，必须按实际模型配置。
 - AGENTS.md 只读取 Workspace 根目录的一份；不递归、不合并、不解析优先级；超过 16 KiB 整份跳过。
-- Compact 只做单次轻量摘要 + 确定性回退，不做分块递归摘要、向量检索或分层记忆；摘要不写回 Session。
-- 没有长期 Memory、Hooks、Checkpoint、MCP、多通道和运行中消息注入。
+- Compact 只做单次轻量摘要 + 确定性回退，不做分块递归摘要、向量检索或分层记忆。
+- 长期记忆仅支持 Workspace 内 `memory/` 文件，不支持多 Agent 共享记忆、向量检索或 Skills 自动创建；Dream 仍依赖当前 Provider，没有独立离线模型。
+- 没有 Hooks、通用 Checkpoint、MCP、多通道和运行中消息注入。
 - 文本读取仍只支持 UTF-8，不解析图片、PDF 或 Office；本地 shell 命令通过独立 `run_command` 提供。
 - 路径检查不是完整安全沙箱，符号链接竞态和并发文件系统修改是后续强化项。
 - 没有 SQLite；JSON 存储不适合大规模或高并发使用。
@@ -810,7 +851,7 @@ uv run pytest -q
 2. **SQLite SessionStore**：替换 JSON 文件，引入事务、索引和更可靠的恢复能力。
 3. **更完整的文件工具**：在现有 `list_dir`/`grep`/`read_file`/`write_file`/`edit_file` 上增加图片/PDF/Office 读取和符号链接竞态防护。
 4. **更高级 Context Governance**：分块递归摘要、跨回合摘要缓存、ContextGovernor 指标与可观测性面板。
-5. **Memory / Skills / Hooks / Checkpoint / MCP**：按 Nanobot 的产品层能力逐层增加，不在 V2 提前实现。
+5. **Memory / Skills / Hooks / MCP**：在现有 Dream/Memory 基础上增加 Skills 自动沉淀与跨 Workspace 记忆。
 
 ## 安全提示
 

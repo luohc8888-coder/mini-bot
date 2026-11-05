@@ -1,8 +1,8 @@
 """Session 数据与 JSON 持久化。
 
-V1 固定使用单 Channel、单默认 Session。Session 只保存消息历史，不保存
-Provider、API Key 等运行配置；Session 文件位于 Harness 数据目录，而不是
-Workspace 内。
+V1 固定使用单 Channel、单默认 Session。Session 保存完整消息历史与可选的
+Summary Checkpoint；不保存 Provider、API Key 等运行配置。Session 文件位于
+Harness 数据目录，而不是 Workspace 内。
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ import tempfile
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -62,14 +63,21 @@ class Session:
     Args:
         key: Session 标识；V1 固定为 ``cli:main``。
         messages: 跨轮次保存的消息列表，字段与 V0 内部消息协议一致。
+        summary: 当前有效摘要；空字符串表示无摘要。
+        summary_boundary: 已被摘要覆盖的原始消息数（``0..len(messages)``）。
+        summary_checkpoint_id: 摘要检查点稳定 ID，用于 Memory Archive 去重。
 
     Notes:
-        ``messages`` 使用 ``default_factory=list``，避免多个 Session 实例
-        共享同一个可变列表。
+        ``messages`` 永远保存完整原始历史，压缩只移动 ``summary_boundary``，
+        绝不删除消息。``messages`` 使用 ``default_factory=list``，避免多个
+        Session 实例共享同一个可变列表。
     """
 
     key: str
     messages: list[dict[str, Any]] = field(default_factory=list)
+    summary: str = ""
+    summary_boundary: int = 0
+    summary_checkpoint_id: str = ""
 
 
 class SessionManager:
@@ -202,7 +210,24 @@ class SessionManager:
                 f"Session 的 messages 必须是列表：{self.path}"
             )
         self._validate_messages(messages)
-        return Session(key=key, messages=deepcopy(messages))
+        # 旧 schema v1 文件没有 Summary Checkpoint 字段，缺省按空摘要加载，
+        # schema_version 保持 1 以保证向后兼容。
+        summary = payload.get("summary", "")
+        summary_boundary = payload.get("summary_boundary", 0)
+        summary_checkpoint_id = payload.get("summary_checkpoint_id", "")
+        self._validate_summary(
+            summary=summary,
+            summary_boundary=summary_boundary,
+            messages=messages,
+            summary_checkpoint_id=summary_checkpoint_id,
+        )
+        return Session(
+            key=key,
+            messages=deepcopy(messages),
+            summary=summary,
+            summary_boundary=summary_boundary,
+            summary_checkpoint_id=summary_checkpoint_id,
+        )
 
     def save(self, session: Session) -> None:
         """原子保存 Session 到 JSON 文件。
@@ -220,11 +245,20 @@ class SessionManager:
                 f"拒绝保存非默认 Session Key：{session.key!r}"
             )
         self._validate_messages(session.messages)
+        self._validate_summary(
+            summary=session.summary,
+            summary_boundary=session.summary_boundary,
+            messages=session.messages,
+            summary_checkpoint_id=session.summary_checkpoint_id,
+        )
 
         payload = {
             "schema_version": SCHEMA_VERSION,
             "workspace": str(self.workspace),
             "session_key": session.key,
+            "summary": session.summary,
+            "summary_boundary": session.summary_boundary,
+            "summary_checkpoint_id": session.summary_checkpoint_id,
             "messages": session.messages,
         }
         try:
@@ -276,8 +310,36 @@ class SessionManager:
                     pass
 
     def clear(self) -> None:
-        """清空当前 Session 的历史并持久化空 Session。"""
-        self.save(Session(key=self.session_key, messages=[]))
+        """清空当前 Session 的历史与 Summary Checkpoint 并持久化。"""
+        self.save(
+            Session(
+                key=self.session_key,
+                messages=[],
+                summary="",
+                summary_boundary=0,
+                summary_checkpoint_id="",
+            )
+        )
+
+    def last_active_time(self) -> datetime | None:
+        """返回 Session 文件的最后活跃时间（本地时间）。
+
+        Returns:
+            Session 文件不存在时返回 ``None``，否则返回文件 mtime 对应的
+            本地时间 ``datetime``。
+
+        Raises:
+            SessionStorageError: 文件存在但无法读取状态。
+        """
+        try:
+            file_stat = self.path.stat()
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise SessionStorageError(
+                f"无法读取 Session 文件状态：{self.path}"
+            ) from exc
+        return datetime.fromtimestamp(file_stat.st_mtime)
 
     @contextmanager
     def lock(self) -> Iterator[None]:
@@ -343,6 +405,41 @@ class SessionManager:
                 raise SessionCorruptError(
                     f"Session 第 {index} 条消息缺少合法 role"
                 )
+
+    @staticmethod
+    def _validate_summary(
+        *,
+        summary: object,
+        summary_boundary: object,
+        messages: list[dict[str, Any]],
+        summary_checkpoint_id: object,
+    ) -> None:
+        """校验 Summary Checkpoint 字段。
+
+        约束：``summary`` / ``summary_checkpoint_id`` 必须是 str；
+        ``summary_boundary`` 必须是 int 且位于 ``0..len(messages)``；
+        ``summary`` 非空时 boundary 至少为 1。
+        """
+        if not isinstance(summary, str):
+            raise SessionCorruptError("Session summary 必须是字符串")
+        # bool 是 int 的子类，这里显式拒绝，避免 True/False 被当作边界值。
+        if isinstance(summary_boundary, bool) or not isinstance(
+            summary_boundary, int
+        ):
+            raise SessionCorruptError("Session summary_boundary 必须是整数")
+        if summary_boundary < 0 or summary_boundary > len(messages):
+            raise SessionCorruptError(
+                f"Session summary_boundary 越界：{summary_boundary}"
+                f"（消息数 {len(messages)}）"
+            )
+        if summary and summary_boundary < 1:
+            raise SessionCorruptError(
+                "Session summary 非空时 summary_boundary 必须 >= 1"
+            )
+        if not isinstance(summary_checkpoint_id, str):
+            raise SessionCorruptError(
+                "Session summary_checkpoint_id 必须是字符串"
+            )
 
     @staticmethod
     def _fsync_directory(path: Path) -> None:
