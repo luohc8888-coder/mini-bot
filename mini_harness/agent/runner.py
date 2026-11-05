@@ -24,8 +24,8 @@ from mini_harness.providers.base import (
 from mini_harness.tools.base import ToolResult
 from mini_harness.tools.registry import ToolRegistry
 
-from .compaction import ContextGovernor
-from .context import ContextBudgetExceeded, ContextConfig, ProviderRequestSnapshot
+from .governor import ContextGovernor
+from .context_types import ContextBudgetExceeded, ContextConfig, ProviderRequestSnapshot
 
 
 @dataclass(slots=True)
@@ -140,7 +140,7 @@ class AgentRunner:
             None。
 
         上下游:
-            main.py 和测试构造 AgentRunner，再交给 AgentLoop。
+            CLI 与测试构造 AgentRunner，再交给 AgentLoop。
         """
         self.provider = provider
         self.tools = tools
@@ -297,22 +297,11 @@ class AgentRunner:
             )
             return response, False
 
-        chat_stream = getattr(self.provider, "chat_stream", None)
-        if callable(chat_stream):
-            response = await chat_stream(
-                messages=provider_messages,
-                tools=tools,
-                on_text_delta=emit_delta,
-            )
-        else:
-            # 兼容只实现 chat 的第三方 Provider：完整拿到响应后一次性
-            # 回调，至少保证 CLI 不会重复打印最终回答。
-            response = await self.provider.chat(
-                messages=provider_messages,
-                tools=tools,
-            )
-            if response.content:
-                emit_delta(response.content)
+        response = await self.provider.chat_stream(
+            messages=provider_messages,
+            tools=tools,
+            on_text_delta=emit_delta,
+        )
         return response, streamed
 
     async def _run_core(

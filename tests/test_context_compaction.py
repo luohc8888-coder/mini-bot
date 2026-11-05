@@ -31,11 +31,7 @@ from mini_harness.agent import (
     ContextGovernor,
     SUMMARY_SYSTEM_PROMPT,
 )
-from mini_harness.agent.compaction import (
-    CompactionOutcome,
-    split_message_regions,
-    truncate_tool_results,
-)
+from mini_harness.agent.compaction import split_message_regions, truncate_tool_results
 from mini_harness.bus import InboundMessage, MessageBus
 from mini_harness.providers.base import (
     LLMProvider,
@@ -553,14 +549,15 @@ async def test_compaction_preserves_tool_call_protocol() -> None:
         *delta,
     ]
 
-    compacted = await compactor.compact(
+    outcome = await compactor.compact(
         messages,
         budget=3000,
         protected_messages=delta,
     )
+    compacted = outcome.messages
 
-    assert compactor.last_outcome is not None
-    assert compactor.last_outcome.compacted is True
+    assert outcome is not None
+    assert outcome.compacted is True
     assert compacted[0] == {"role": "system", "content": "system"}
     assert compacted[1]["compaction_summary"] is True
     assert compacted[-len(delta) :] == delta
@@ -589,13 +586,14 @@ async def test_compact_failure_returns_original_messages_safely() -> None:
     ]
     original = deepcopy(messages)
 
-    compacted = await compactor.compact(messages, budget=500)
+    outcome = await compactor.compact(messages, budget=500)
+    compacted = outcome.messages
 
     assert compacted == original
     assert messages == original
-    assert compactor.last_outcome is not None
-    assert compactor.last_outcome.compacted is False
-    assert "摘要调用失败" in str(compactor.last_outcome.error)
+    assert outcome is not None
+    assert outcome.compacted is False
+    assert "摘要调用失败" in str(outcome.error)
     assert compacted[-1] == {"role": "user", "content": "当前请求：修复 P0。"}
 
 
@@ -808,12 +806,13 @@ async def test_compactor_rejects_summary_that_does_not_reduce_context() -> None:
         {"role": "user", "content": "当前问题"},
     ]
 
-    compacted = await compactor.compact(messages, budget=1000)
+    outcome = await compactor.compact(messages, budget=1000)
+    compacted = outcome.messages
 
     assert compacted == messages
-    assert compactor.last_outcome is not None
-    assert compactor.last_outcome.compacted is False
-    assert "未减少" in str(compactor.last_outcome.error)
+    assert outcome is not None
+    assert outcome.compacted is False
+    assert "未减少" in str(outcome.error)
     assert len(provider.calls) == 1
 
 
@@ -835,7 +834,8 @@ async def test_current_user_message_is_never_compacted() -> None:
         current,
     ]
 
-    compacted = await compactor.compact(messages, budget=1000)
+    outcome = await compactor.compact(messages, budget=1000)
+    compacted = outcome.messages
 
     assert compacted[-1] == current
     assert sum(
@@ -1008,8 +1008,6 @@ async def test_last_reflects_final_real_provider_request(tmp_path: Path) -> None
     assert snapshot.compacted is False
     assert snapshot.estimated_tokens <= snapshot.available_input_tokens
     assert snapshot.tool_definitions == registry.get_definitions()
-    # 旧字段与快照同步，且 /last 不再展示 ContextBuilder 初始版本。
-    assert builder.last_request_messages == snapshot.messages
 
 
 # ---------------------------------------------------------------------------
@@ -1027,12 +1025,13 @@ async def test_compactor_no_history_is_safe_noop() -> None:
         {"role": "user", "content": "当前请求"},
     ]
 
-    result = await compactor.compact(messages, budget=1000)
+    outcome = await compactor.compact(messages, budget=1000)
+    result = outcome.messages
 
     assert result == messages
     assert provider.calls == []
-    assert compactor.last_outcome is not None
-    assert compactor.last_outcome.compacted is False
+    assert outcome is not None
+    assert outcome.compacted is False
 
 
 @pytest.mark.asyncio
@@ -1047,7 +1046,8 @@ async def test_compactor_no_tool_calls_still_protects_current_user() -> None:
         {"role": "user", "content": "当前问题"},
     ]
 
-    result = await compactor.compact(messages, budget=600)
+    outcome = await compactor.compact(messages, budget=600)
+    result = outcome.messages
 
     assert result[-1] == {"role": "user", "content": "当前问题"}
     assert result[1]["compaction_summary"] is True
@@ -1196,13 +1196,14 @@ async def test_summary_request_that_exceeds_budget_is_not_sent() -> None:
         {"role": "assistant", "content": "a" * 300},
     ]
 
-    compacted = await compactor.compact(messages, budget=200)
+    outcome = await compactor.compact(messages, budget=200)
+    compacted = outcome.messages
 
     assert compacted == messages
     assert provider.summary_calls == 0
-    assert compactor.last_outcome is not None
-    assert compactor.last_outcome.compacted is False
-    assert "超过输入预算" in str(compactor.last_outcome.error)
+    assert outcome is not None
+    assert outcome.compacted is False
+    assert "超过输入预算" in str(outcome.error)
 
 
 @pytest.mark.asyncio
@@ -1220,13 +1221,14 @@ async def test_summary_larger_than_budget_is_rejected_by_compactor() -> None:
         )
     messages.append({"role": "user", "content": "当前问题"})
 
-    compacted = await compactor.compact(messages, budget=1000)
+    outcome = await compactor.compact(messages, budget=1000)
+    compacted = outcome.messages
 
     assert compacted == messages
     assert provider.calls
-    assert compactor.last_outcome is not None
-    assert compactor.last_outcome.compacted is False
-    assert "摘要本身估算" in str(compactor.last_outcome.error)
+    assert outcome is not None
+    assert outcome.compacted is False
+    assert "摘要本身估算" in str(outcome.error)
 
 
 def test_unfinished_tail_does_not_hide_latest_completed_conclusion(

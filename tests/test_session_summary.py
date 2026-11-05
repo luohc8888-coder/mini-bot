@@ -47,9 +47,10 @@ def write_session_payload(manager: SessionManager, payload: dict[str, object]) -
 
 
 def base_payload(manager: SessionManager, messages: list[dict[str, object]]) -> dict[str, object]:
-    """构造旧 schema v1 的最小合法 payload（不含 summary 字段）。"""
+    """构造当前 schema 的合法 payload。"""
     return {
-        "schema_version": 1,
+        "schema_version": 2,
+        "summary": "", "summary_boundary": 0, "summary_checkpoint_id": "",
         "workspace": str(manager.workspace),
         "session_key": DEFAULT_SESSION_KEY,
         "messages": messages,
@@ -79,18 +80,27 @@ def test_save_and_reload_restores_summary_checkpoint(tmp_path: Path) -> None:
     assert restored == session
 
 
-def test_old_schema_v1_file_without_summary_fields_loads_defaults(
-    tmp_path: Path,
-) -> None:
-    """旧 schema v1 文件缺少 summary 字段时按空摘要加载。"""
+def test_old_schema_requires_explicit_migration(tmp_path: Path) -> None:
+    from mini_harness.session import SessionStorageError
+    from mini_harness.session.migration import migrate_session
+
     manager = make_manager(tmp_path)
     messages = make_messages(2)
-    write_session_payload(manager, base_payload(manager, messages))
-
+    payload = base_payload(manager, messages)
+    payload["schema_version"] = 1
+    for key in ("summary", "summary_boundary", "summary_checkpoint_id"):
+        payload.pop(key)
+    write_session_payload(manager, payload)
+    before = manager.path.read_bytes()
+    with pytest.raises(SessionStorageError, match="--migrate-session"):
+        manager.load()
+    assert manager.path.read_bytes() == before
+    result = migrate_session(manager)
+    assert result.status == "migrated"
+    assert result.backup_path.read_bytes() == before
     restored = manager.load()
     assert restored.summary == ""
     assert restored.summary_boundary == 0
-    assert restored.summary_checkpoint_id == ""
     assert restored.messages == messages
 
 

@@ -12,7 +12,9 @@ CLI → InboundMessage → MessageBus → AgentLoop
 
 项目参考 [HKUDS/nanobot](https://github.com/HKUDS/nanobot) 的分层思路，但有意保持轻量：不依赖 Agent 框架、不使用数据库，只保留消息总线、Agent Loop、Agent Runner、Provider、ToolRegistry、Session/Workspace 产品层和 V2 的 ContextBuilder。
 
-当前版本 **Mini Harness V2** 在 V0 工具调用闭环与 V1 Session/Workspace 之上，增加了 Context Engineering：
+当前功能版本 **Mini Harness V2.2** 在工具调用闭环与 Session/Workspace 之上，增加了上下文预算治理、持久化摘要与长期记忆。Python 包版本号目前为 `0.3.0`。
+
+主要能力：
 
 - 集中维护的默认 System Prompt（`mini_harness/prompts/defaults.py`）
 - Workspace 根目录 `AGENTS.md` 自动加载（UTF-8、大小限制、失败降级）
@@ -72,12 +74,12 @@ mini-harness --demo
 
 `mini-bot` 是等价的安装命令。安装后会同时提供 `mini-bot` 和 `mini-harness` 两个入口。
 
-也可以继续使用项目内兼容入口：
+也可以通过模块入口运行：
 
 ```bash
-uv run python main.py --interactive
-uv run python main.py --demo
-uv run python main.py --list-providers
+uv run python -m mini_harness --interactive
+uv run python -m mini_harness --demo
+uv run python -m mini_harness --list-providers
 python -m mini_harness --interactive
 ```
 
@@ -133,21 +135,22 @@ MessageBus
 CLI 显示回答
 ```
 
-`--demo` 仍然走 V0 的 MessageBus + AgentLoop 路径，只是不启用 Session 与 ContextBuilder。
+`--demo` 显式使用 `AgentLoop(stateless=True)`，通过同一套 MessageBus / Runner 完成离线演示，不写入 Session。正式交互始终绑定 Workspace 与 Session。
 
 ### 模块职责
 
 | 模块 | 职责 |
 |---|---|
 | `workspace.py` | 解析并固定 Workspace，计算稳定 ID，提供路径边界检查 |
-| `session/manager.py` | 定义 `Session`，负责 JSON 读取、原子保存和清空；只保存完整历史 |
+| `session/manager.py` | 完整历史与 Summary Checkpoint 的严格加载、原子保存和清空 |
 | `agent/loop.py` | 消费 `InboundMessage`，加载 Session，调用 ContextBuilder，执行 Runner，只追加本轮新增消息 |
-| `agent/context.py` | V2 ContextBuilder：System Prompt 组装、AGENTS.md 读取、Token 估算、历史选择与预算 |
-| `agent/prompt.py` | V1 兼容导出；实际默认模板集中在 `prompts/defaults.py` |
+| `agent/context.py` | ContextBuilder：System Prompt、AGENTS.md、长期记忆与历史组装 |
+| `agent/context_types.py` / `tokens.py` / `messages.py` | 上下文数据结构、Token 估算与历史消息协议 |
+| `agent/governor.py` / `compaction.py` / `transcript.py` | 请求预算治理、结构化摘要结果与共享摘要渲染 |
 | `prompts/defaults.py` | 唯一的默认 System Prompt 来源 |
 | `agent/runner.py` | 只执行模型/工具迭代，不感知 Session 文件或 Workspace；返回 `new_messages` 显式边界 |
 | `bus/` | 隔离输入输出通道与 Agent 核心 |
-| `cli/app.py` | 配置选择、CLI 命令、`/context` 和终端展示 |
+| `cli/app.py` | 组装依赖与统一 Session 交互；渲染、设置与维护分别在 `console.py` / `settings.py` / `runtime.py` |
 | `tools/` | 工具注册、参数校验和执行；包含加法、文件读写/搜索/编辑/元信息，以及命令执行 |
 
 Session 持久化代码没有放入 `AgentRunner` 或 `ToolRegistry`。V2 进一步明确：Session 保存历史、ContextBuilder 构建模型输入、AgentRunner 执行；三者不混合职责。
@@ -302,7 +305,7 @@ file_info(path)
 统一通过 `mini_harness.tools` 导入公开工具；需要按实现模块导入时，搜索工具
 使用 `mini_harness.tools.search`，编辑工具使用 `mini_harness.tools.edit`。
 
-文件工具只在 CLI 有 Workspace 时注册；V0 无 Workspace 的兼容调用仍只有 `AddTool`。文件工具需要真实 Provider 具备 tool calling 能力；内置 `MockProvider` 是预设脚本，默认 `mock-add-demo` 仍只会调用 `add`。
+正式 CLI 始终绑定 Workspace 并注册完整工具；离线 demo 只注册 `AddTool`。文件工具需要真实 Provider 具备 tool calling 能力；内置 `MockProvider` 是预设脚本，默认 `mock-add-demo` 仍只会调用 `add`。
 
 ### 命令执行
 
@@ -383,12 +386,13 @@ System Prompt（含 AGENTS.md / Long-term Memory）
     + Current Message
 ```
 
-- `SessionCompactor`：统一 `/compact`、Idle Compaction 与未来触发源的压缩实现；只压缩已完成的完整用户轮次，遇不完整轮次停止，工具调用与结果配对保持不变；支持把上一版 Summary 与新增历史合并后再摘要；失败时 Session 完全不变。
-- 保存顺序：先以单次原子 JSON 替换写入 `summary` + `summary_boundary` + `summary_checkpoint_id`，成功后再追加 Memory Archive；即使归档失败，摘要检查点仍然有效。
-- `IdleCompactionScheduler`：默认每 60 秒检查 Session 文件 mtime，超过 15 分钟无活动且有完整未归档历史时尝试压缩；正在执行任务的 Session、活跃会话、无新历史时跳过；同一 Session 通过 `asyncio.Lock` 互斥。`ContextConfig.idle_compact_after_minutes = 0` 可关闭。
+- `SessionCompactor`：统一 `/compact`、Idle Compaction 与未来触发源的压缩实现；只压缩协议合法、已结束的用户轮次，最新未完成请求保留；中间失败轮次在下一条 user 到来后可参与摘要，并标注未产生最终回答；支持把上一版 Summary 与新增历史合并后再摘要；失败时 Session 完全不变。
+- 保存顺序：先以单次原子 JSON 替换写入 `summary` + `summary_boundary` + `summary_checkpoint_id`，成功后再追加 Memory Archive；归档失败时保留有效检查点，下次压缩先补归档，成功后才允许生成新版摘要。
+- `IdleCompactionScheduler`：默认每 60 秒检查 Session 文件 mtime，超过 15 分钟无活动且有未归档历史或待补偿检查点时尝试压缩；活跃会话跳过，同一 Session 通过 `asyncio.Lock` 互斥。临时失败按 60 秒起步指数退避，最多 1 小时；摘要不减少 Token 等稳定失败在 Session 改变前不再自动重试。`ContextConfig.idle_compact_after_minutes = 0` 可关闭。
 - `/compact`：不依赖 Token 阈值与空闲时间，立即压缩当前 Session 未归档历史，返回压缩成功 / 无需压缩 / 失败 / 忙。
 - Memory Archive：`<workspace>/memory/history.jsonl` 每条记录包含 `cursor`（从 1 单调递增）、`session_key`、`timestamp`、`content`、`checkpoint_id`；同一检查点重复归档幂等。
 - `DreamManager`：读取 `.dream_cursor` 之后、单次最多 `dream_max_entries`（默认 20）条归档摘要；没有新记录时不调用 LLM；LLM 只返回结构化 JSON（`add` / `update` / `remove`），由代码校验、去重、按 section 合并后原子写入 `MEMORY.md`；只有写入成功后才推进 `.dream_cursor`，任何失败都保留旧 cursor 允许下次重试。
+- Dream 请求遵守模型窗口与 CLI 输入/输出预算：完整归档按预算分批，单条超大归档分片且全部成功后才提交；长期记忆仅裁剪发送副本，完整文件参与去重与操作校验。陈旧 cursor 超过当前 history 时从 0 重放，成功前不改旧 cursor；后台输出额度与主对话按协程隔离。
 - `DreamScheduler`：默认每 2 小时检查一次；进程退出即停止，重启后从 cursor 继续。
 - `/dream`：手动触发同一 Dream 提取逻辑，与定时任务通过实例锁互斥；返回处理条数、新增/更新/删除/跳过数量、cursor 与失败原因。
 - `/clear` 只清空当前 Session（含 Summary Checkpoint），不删除 Workspace 的长期记忆 `MEMORY.md`。
@@ -461,13 +465,26 @@ Session 历史**不写入 Workspace**，避免 Agent 的工作文件和 Harness 
 
 可通过 `MINI_HARNESS_HOME` 覆盖 Harness 数据根目录；`data_root` 也可以由测试或嵌入式调用显式传入。
 
+### 旧 Session 显式迁移
+
+当前正常加载只接受 `schema_version: 2`，且要求完整的 Summary Checkpoint 字段。旧文件不会在启动时隐式改写。
+
+```bash
+mini-bot --migrate-session --workspace /path/to/project
+```
+
+迁移命令持有 Session 锁，先保存原始字节备份 `session.json.v1.bak`，再原子写入新格式；消息、已有摘要、边界与 checkpoint ID 均保留。校验或备份失败不修改原文件，重复执行不会重写已迁移的 Session。
+
 ### JSON 格式
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "workspace": "/path/to/project",
   "session_key": "cli:main",
+  "summary": "",
+  "summary_boundary": 0,
+  "summary_checkpoint_id": "",
   "messages": [
     {
       "role": "user",
@@ -498,7 +515,7 @@ Session 历史**不写入 Workspace**，避免 Agent 的工作文件和 Harness 
 }
 ```
 
-字段与当前 V0 的消息协议一致。要求包括：
+消息使用统一的内部协议。要求包括：
 
 - UTF-8 编码，`ensure_ascii=False`。
 - 保留 assistant 的 `tool_calls` 和 tool 的 `tool_call_id`。
@@ -666,12 +683,12 @@ mini-harness --interactive
 
 模型列表是建议值，模型 ID 会随厂商更新；在 CLI 中选择“自定义模型 ID”即可输入任意模型名。
 
-### 代码中使用 ProviderFactory
+### 代码中创建 Provider
 
 ```python
-from mini_harness.providers import ProviderConfig, ProviderFactory
+from mini_harness.providers import ProviderConfig, create_provider
 
-provider = ProviderFactory().create(
+provider = create_provider(
     ProviderConfig(provider="deepseek", model="deepseek-chat")
 )
 ```
@@ -699,45 +716,57 @@ API Key 默认从 `DEEPSEEK_API_KEY` 读取，也可以显式传入 `api_key`。
 
 需要明确区分：
 
-- **V2 实际实现：** 默认 System Prompt、根目录 AGENTS.md、简化 Token 估算、按完整用户轮次裁剪历史、ToolCall/ToolResult 配对校验、`ContextBudgetExceeded`、`/context`。单 CLI Channel、单默认 Session、JSON 持久化、原子替换、多轮历史恢复保持不变。
-- **Nanobot 正式源码的高级能力：** 多 Session、Session Queue、Session Lock、更完整的并发/一致性控制、SQLite/数据库存储、完整 ContextBuilder（SOUL.md/USER.md/Memory/Skills）、ContextGovernor 压缩、Memory、Hooks、Checkpoint、MCP、多通道等。
-- **V2 不支持：** 多 Session 切换、会话分叉/过期、跨进程并发写入保证、SQLite、自动历史摘要/模型压缩、Memory、Hooks、Checkpoint、MCP、多 Channel、运行中消息注入。
+- **当前已实现：** 默认 System Prompt、根目录 AGENTS.md、Token 估算、历史选择、工具消息配对校验、每次请求预算治理、模型摘要与确定性回退、持久化 Summary Checkpoint、Memory Archive、Dream、Idle Compaction，以及 `/context` 等诊断命令。Session 使用 JSON 原子保存，并以进程锁限制同一 Workspace 的 CLI 实例。
+- **当前未实现：** 多 Session 切换、会话分叉/过期、多写者并发与数据库存储、Hooks、MCP、多 Channel、运行中消息注入、Skills 管理、SOUL.md/USER.md 等启动文件组合。
 
 本实现不声称与 Nanobot 在 Session 并发、一致性、上下文压缩或恢复能力上完全等价。详细的源码对照见 [`docs/context_engineering.md`](docs/context_engineering.md)。
 
 ## 项目结构
 
+完整职责、运行调用关系、兼容清理结果和数据迁移说明见 [代码结构与兼容清单](docs/code_structure_and_compatibility.md)。
+
 ```text
 mini-harness/
-├── main.py                       # 兼容入口：交互式 / --demo / --list-providers
 ├── pyproject.toml
 ├── uv.lock
 ├── README.md
-├── docs/
-│   └── context_engineering.md    # V2 上下文工程源码学习文档
+├── docs/                         # 结构、设计与 QA 文档
 ├── mini_harness/
-│   ├── __init__.py
-│   ├── __main__.py
-│   ├── workspace.py              # Workspace / WorkspaceResolver / workspace_id
+│   ├── __init__.py               # 仅包元数据，避免提前加载所有组件
+│   ├── __main__.py               # python -m mini_harness
+│   ├── workspace.py              # 路径解析、Workspace 边界与 ID
 │   ├── bus/
 │   │   ├── events.py
 │   │   └── queue.py
 │   ├── agent/
-│   │   ├── loop.py               # Session 感知的 MessageBus 消费者
-│   │   ├── context.py            # V2 ContextBuilder / ContextConfig / Token 估算
-│   │   ├── prompt.py             # V1 兼容导出，实际模板在 prompts/defaults.py
-│   │   └── runner.py
+│   │   ├── loop.py               # Session / 显式 stateless 消息调度
+│   │   ├── runner.py             # 单次模型/工具循环
+│   │   ├── context.py            # 上下文组装与历史选择
+│   │   ├── context_types.py      # 配置、统计、快照与错误
+│   │   ├── tokens.py             # Token 估算与文本截断
+│   │   ├── messages.py           # 轮次、工具配对与历史摘要
+│   │   ├── governor.py           # 每次请求的预算治理
+│   │   ├── compaction.py         # 结构化摘要结果与工具结果截断
+│   │   ├── transcript.py         # 两类摘要共享的预算/渲染规则
+│   │   ├── session_compaction.py # 持久化摘要与归档补偿
+│   │   └── maintenance.py        # Idle Compaction 与失败退避
 │   ├── prompts/
-│   │   ├── __init__.py
-│   │   └── defaults.py           # 默认 System Prompt 的唯一来源
+│   │   └── defaults.py           # 唯一默认提示词来源
 │   ├── session/
-│   │   ├── __init__.py
-│   │   ├── manager.py            # Session / SessionManager / JSON 原子持久化
-│   │   └── workspace.py          # Workspace 的 session 子包导出
+│   │   ├── manager.py            # schema v2 严格加载、原子保存与锁
+│   │   └── migration.py          # 显式 v1 → v2 迁移与原始备份
+│   ├── memory/
+│   │   ├── store.py              # 记忆、归档与 cursor 文件 I/O
+│   │   ├── document.py           # 文档模型、解析、确定性增删改
+│   │   ├── dream.py              # 记忆整理与输入分批/分片
+│   │   └── scheduler.py          # Dream 后台调度
 │   ├── cli/
-│   │   ├── app.py
-│   │   ├── main.py
-│   │   └── profiles.py
+│   │   ├── main.py               # 参数、安装入口与离线 demo
+│   │   ├── app.py                # 单一 Session 交互与命令调度
+│   │   ├── console.py            # 终端与流式渲染
+│   │   ├── settings.py           # Provider 选择、推理与模型预算设置
+│   │   ├── runtime.py            # 维护命令、组件组装与任务生命周期
+│   │   └── profiles.py           # 命名配置持久化
 │   ├── providers/
 │   │   ├── base.py
 │   │   ├── config.py
@@ -748,24 +777,14 @@ mini-harness/
 │   │   └── mock.py
 │   └── tools/
 │       ├── base.py
-│       ├── edit.py               # EditFileTool：精确字符串替换
-│       ├── filesystem.py         # GrepTool / ListDirTool / ReadFileTool / WriteFileTool
-│       └── registry.py
-└── tests/
-    ├── test_bus.py
-    ├── test_runner.py
-    ├── test_prompt.py
-    ├── test_context.py
-    ├── test_context_budget.py
-    ├── test_context_integration.py
-    ├── test_e2e.py
-    ├── test_providers.py
-    ├── test_cli.py
-    ├── test_workspace.py
-    ├── test_session.py
-    ├── test_session_integration.py
-    ├── test_streaming.py
-    └── test_filesystem_tools.py
+│       ├── registry.py           # 注册、校验、超时与输出上限
+│       ├── examples.py           # AddTool 示例业务工具
+│       ├── _file_io.py           # 文件共享原子写入
+│       ├── filesystem.py         # ReadFileTool / FileInfoTool / WriteFileTool
+│       ├── search.py             # ListDirTool / FindFilesTool / GrepTool
+│       ├── edit.py               # EditFileTool / ApplyPatchTool
+│       └── command.py            # RunCommandTool
+└── tests/                        # 工具、上下文、会话、记忆与 CLI/Provider 测试
 ```
 
 ## 测试
@@ -774,10 +793,10 @@ mini-harness/
 uv run pytest -q
 ```
 
-当前结果：
+最近一次完整回归结果（2026-11-05）：
 
 ```text
-163 passed
+438 passed
 ```
 
 测试覆盖：
@@ -785,19 +804,25 @@ uv run pytest -q
 | 测试文件 | 覆盖内容 |
 |---|---|
 | `tests/test_bus.py` | 入站/出站消息往返、asyncio.Queue FIFO |
-| `tests/test_prompt.py` | System Prompt 的 Workspace 路径和关键规则（V1 兼容入口） |
+| `tests/test_prompt.py` | System Prompt 的 Workspace 路径和关键规则（当前默认模板入口） |
 | `tests/test_context.py` | 默认 System Prompt、AGENTS.md 加载/缺失/更新/空文件/大小限制/UTF-8/cwd 隔离、消息顺序与 history 不可变性、Token 估算 |
 | `tests/test_context_budget.py` | 预算公式、Tool Schema 预留、长历史按轮次裁剪、ToolCall/ToolResult 配对、孤立 tool 丢弃、超预算异常、统计字段 |
 | `tests/test_context_integration.py` | Session 完整历史保留、System Prompt 不落盘、AGENTS.md 每轮刷新、跨重启工具调用 ID、超预算保护、Runner 新增消息边界、`/context` |
 | `tests/test_runner.py` | MockProvider、消息历史、tool_call_id 配对、max_iterations、预算耗尽收尾、System Prompt 隔离、参数校验、工具异常 |
-| `tests/test_e2e.py` | V0 完整 E2E 调用链、CLI 演示输出、Loop 正常退出与停止时序 |
+| `tests/test_e2e.py` | 显式无状态 E2E 调用链、CLI 演示输出、Loop 正常退出与停止时序 |
 | `tests/test_providers.py` | 预设完整性、工厂构建、环境变量、OpenAI/Anthropic 请求响应转换、HTTP 错误 |
 | `tests/test_cli.py` / `tests/test_reasoning_settings.py` / `tests/test_output_tokens_config.py` | Profile 存储与权限、默认配置、输出额度校验与协议映射、多轮对话、模型切换、推理菜单保存/恢复/取消、实际请求参数更新与历史保留 |
 | `tests/test_workspace.py` | 稳定 workspace_id、不同路径隔离、`../`、绝对路径和符号链接越界检查 |
+| `tests/test_session_migration.py` | 显式 schema 迁移、备份冲突、写入失败恢复、严格加载与 CLI 退出码 |
 | `tests/test_session.py` | 缺失/损坏 JSON、Workspace 冲突、独立副本、清空、原子保存失败、tool_calls 持久化、单实例锁 |
 | `tests/test_session_integration.py` | Session 重启恢复、不同 Workspace 隔离、历史不重复、第二轮 Provider 入参精确包含 system/user/assistant/tool_calls/tool_result、持久化失败、预算耗尽收尾落盘、失败回合不落盘、CLI 命令 |
 | `tests/test_streaming.py` | Mock/OpenAI/Anthropic 的流式分片、tool_calls 聚合、Runner 不写中间 chunk、CLI 不重复打印最终回答 |
 | `tests/test_filesystem_tools.py` | `list_dir`/`grep`/`read_file`/`write_file`/`edit_file` 的递归发现、噪声目录过滤、正则搜索、路径校验、分页、UTF-8/二进制错误、Markdown 创建与覆盖、精确替换、CLI 工具注册 |
+| `tests/test_search_tools.py` / `tests/test_patch_tools.py` / `tests/test_command_tools.py` | glob 与遍历边界、批量编辑与回滚、命令超时/输出上限/确认钩子 |
+| `tests/test_context_compaction.py` / `tests/test_model_capacity.py` / `tests/test_agent_progress.py` | 每次请求预算、模型容量与输出额度、循环进度提示 |
+| `tests/test_session_summary.py` / `tests/test_session_compaction.py` / `tests/test_idle_compaction.py` | 摘要字段持久化、归档补偿、失败轮次、空闲检测与退避 |
+| `tests/test_memory_store.py` / `tests/test_dream.py` / `tests/test_memory_acceptance.py` | 记忆存储、cursor 恢复、结构化操作、输入预算与分片完整性 |
+| `tests/test_context_summary.py` / `tests/test_loop_summary.py` / `tests/test_cli_memory_commands.py` | Summary 注入、Loop 保存与 CLI 维护命令 |
 
 ## V2 已实现功能与限制
 

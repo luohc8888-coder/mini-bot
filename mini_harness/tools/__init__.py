@@ -5,7 +5,8 @@ from .command import RunCommandTool
 from .edit import ApplyPatchTool, EditFileTool
 from .filesystem import FileInfoTool, ReadFileTool, WriteFileTool
 from .search import FindFilesTool, GrepTool, ListDirTool
-from .registry import AddTool, ToolRegistry
+from .examples import AddTool
+from .registry import ToolRegistry
 
 __all__ = [
     "AddTool",

@@ -5,12 +5,8 @@ from __future__ import annotations
 from copy import deepcopy
 from pathlib import Path
 
-from mini_harness.agent import (
-    ContextBuilder,
-    ContextConfig,
-    build_system_prompt,
-    estimate_tokens,
-)
+from mini_harness.agent import ContextBuilder, ContextConfig, estimate_tokens
+from mini_harness.prompts import build_default_system_prompt
 from mini_harness.prompts.defaults import (
     DEFAULT_SYSTEM_PROMPT,
     build_default_system_prompt,
@@ -43,7 +39,7 @@ def test_build_messages_starts_with_system_prompt(tmp_path: Path) -> None:
     )
 
     assert messages[0]["role"] == "system"
-    assert messages[0]["content"] == build_system_prompt(workspace)
+    assert messages[0]["content"] == build_default_system_prompt(workspace)
     assert sum(1 for item in messages if item["role"] == "system") == 1
     assert messages[-1] == {"role": "user", "content": "新问题"}
 

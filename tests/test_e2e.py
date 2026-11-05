@@ -12,7 +12,7 @@ import asyncio
 
 import pytest
 
-from main import main as cli_main
+from mini_harness.cli.main import main as cli_main
 from mini_harness.agent import AgentLoop, AgentRunner
 from mini_harness.bus import InboundMessage, MessageBus
 from mini_harness.providers import LLMResponse, MockProvider, ToolCallRequest
@@ -48,7 +48,7 @@ def build_pipeline() -> tuple[
         ]
     )
     runner = AgentRunner(provider=provider, tools=registry)
-    agent_loop = AgentLoop(bus=bus, runner=runner, max_iterations=8)
+    agent_loop = AgentLoop(stateless=True, bus=bus, runner=runner, max_iterations=8)
 
     # create_task 让常驻 AgentLoop 与测试主协程并发运行；直接 await
     # agent_loop.run() 会永久阻塞，无法继续投递入站消息。
@@ -103,7 +103,7 @@ async def test_stop_before_run_prevents_loop_from_starting() -> None:
     registry = ToolRegistry()
     registry.register(AddTool())
     runner = AgentRunner(provider=MockProvider([]), tools=registry)
-    agent_loop = AgentLoop(bus=bus, runner=runner)
+    agent_loop = AgentLoop(stateless=True, bus=bus, runner=runner)
 
     # 模拟 create_task 之后、协程尚未得到执行机会就请求停止的时序。
     agent_loop.stop()
@@ -118,3 +118,20 @@ def test_cli_main_prints_expected_answer(capsys: pytest.CaptureFixture[str]) -> 
     asyncio.run(cli_main(["--demo"]))
     captured = capsys.readouterr()
     assert captured.out.strip() == "结果是 5"
+
+
+def test_loop_requires_explicit_stateless_mode() -> None:
+    runner = AgentRunner(provider=MockProvider([]), tools=ToolRegistry())
+    with pytest.raises(ValueError, match="stateless=True"):
+        AgentLoop(bus=MessageBus(), runner=runner)
+
+
+def test_loop_rejects_session_and_stateless_together(tmp_path) -> None:
+    from mini_harness.session import SessionManager
+
+    runner = AgentRunner(provider=MockProvider([]), tools=ToolRegistry())
+    with pytest.raises(ValueError, match="不能同时指定"):
+        AgentLoop(
+            bus=MessageBus(), runner=runner, stateless=True,
+            session_manager=SessionManager(tmp_path, data_root=tmp_path / "data"),
+        )

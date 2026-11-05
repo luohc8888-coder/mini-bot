@@ -518,3 +518,62 @@ async def test_openai_provider_explains_missing_authorization_header() -> None:
     with pytest.raises(ProviderError, match="Authorization") as exc_info:
         await provider.chat([{"role": "user", "content": "hello"}])
     assert "API Key" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_preserves_usage() -> None:
+    """真实 API 的 usage 应保留在 LLMResponse 上，供收益评估使用。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "OK"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 12,
+                    "completion_tokens": 3,
+                    "total_tokens": 15,
+                },
+            },
+        )
+
+    provider = OpenAICompatibleProvider(
+        api_key="sk-test",
+        base_url="https://example.com/v1",
+        model="test-model",
+        transport=httpx.MockTransport(handler),
+    )
+    response = await provider.chat([{"role": "user", "content": "hi"}])
+    assert response.usage["prompt_tokens"] == 12
+    assert response.usage["completion_tokens"] == 3
+    assert response.usage["total_tokens"] == 15
+
+
+@pytest.mark.asyncio
+async def test_anthropic_provider_preserves_usage() -> None:
+    """Anthropic usage 字段也应保留，字段缺失时保持空字典。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "content": [{"type": "text", "text": "OK"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 9, "output_tokens": 2},
+            },
+        )
+
+    provider = AnthropicProvider(
+        api_key="sk-ant",
+        base_url="https://api.anthropic.com/v1",
+        model="claude-test",
+        transport=httpx.MockTransport(handler),
+    )
+    response = await provider.chat([{"role": "user", "content": "hi"}])
+    assert response.usage["input_tokens"] == 9
+    assert response.usage["output_tokens"] == 2

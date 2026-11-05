@@ -16,18 +16,6 @@ class ProviderConfigurationError(ValueError):
     """Provider 配置缺失或不合法时抛出。"""
 
 
-class ProviderFactory:
-    """面向对象形式的 Provider 工厂，便于依赖注入和扩展。
-
-    ``create_provider`` 是等价的函数式入口；二者都根据 ``ProviderConfig``
-    的 provider key 查找预设并构建具体适配器。
-    """
-
-    def create(self, config: ProviderConfig) -> LLMProvider:
-        """创建 Provider 实例。"""
-        return create_provider(config)
-
-
 def resolve_api_key(
     preset: ProviderPreset,
     explicit_api_key: str = "",
@@ -82,7 +70,7 @@ def create_mock_provider() -> MockProvider:
     """创建用于离线演示/测试的 MockProvider。
 
     第一次响应请求 add(2, 3)，第二次读取工具结果并回答 ``"结果是 5"``。
-    CLI 的 Mock 选项和 `python main.py --demo` 都使用该工厂。
+    CLI 的 Mock 选项和 `python -m mini_harness --demo` 都使用该工厂。
     """
     return MockProvider(
         [

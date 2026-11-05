@@ -56,7 +56,7 @@ class AnthropicProvider(LLMProvider):
             provider_name: 错误信息中展示的名称。
 
         上下游:
-            ProviderFactory 创建本对象，AgentRunner 调用 ``chat``。
+            create_provider 创建本对象，AgentRunner 调用 ``chat``。
         """
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
@@ -295,6 +295,11 @@ class AnthropicProvider(LLMProvider):
             content="".join(text_parts) or None,
             tool_calls=tool_calls,
             finish_reason=str(data.get("stop_reason") or "stop"),
+            usage=(
+                data.get("usage")
+                if isinstance(data.get("usage"), dict)
+                else {}
+            ),
         )
 
     @staticmethod

@@ -38,7 +38,7 @@ class ProviderConfig:
         传给 ``create_provider`` 的配置对象。
 
     上下游:
-        交互式 CLI、环境变量或未来的配置文件产生该对象；ProviderFactory
+        交互式 CLI、环境变量或未来的配置文件产生该对象；create_provider
         根据它构建 OpenAI-compatible 或 Anthropic Provider。
     """
 

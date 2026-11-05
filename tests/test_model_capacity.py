@@ -6,8 +6,9 @@ from pathlib import Path
 import pytest
 
 from mini_harness.agent import ContextConfig
-from mini_harness.agent.compaction import ContextGovernor, truncate_tool_results
-from mini_harness.agent.context import estimate_messages_tokens
+from mini_harness.agent.governor import ContextGovernor
+from mini_harness.agent.compaction import truncate_tool_results
+from mini_harness.agent.tokens import estimate_messages_tokens
 from mini_harness.agent.runner import _is_readonly_command
 from mini_harness.cli import InteractiveCLI, ProfileStore, ProviderProfile
 from mini_harness.cli.app import Selection
@@ -66,7 +67,7 @@ async def test_capacity_flags_override_existing_profile_and_activate_immediately
 
 @pytest.mark.parametrize("window,reserve", [(32768, 2048), (0, 2048)])
 def test_context_overrides_are_independent(tmp_path: Path, window: int, reserve: int) -> None:
-    cli = InteractiveCLI(profile_store=ProfileStore(tmp_path / "config.json"), max_context_tokens=window, reserve_output_tokens=reserve)
+    cli = InteractiveCLI(workspace=tmp_path, data_root=tmp_path / "data", profile_store=ProfileStore(tmp_path / "config.json"), max_context_tokens=window, reserve_output_tokens=reserve)
     selection = Selection(ProviderConfig(provider="custom", context_window_tokens=1048576, max_output_tokens=393216), get_preset("custom"))
     config = cli._effective_context_config(selection)
     assert config.max_context_tokens == (window or 1048576)
@@ -74,7 +75,7 @@ def test_context_overrides_are_independent(tmp_path: Path, window: int, reserve:
 
 
 def test_unknown_model_does_not_inherit_previous_model_window(tmp_path: Path) -> None:
-    cli = InteractiveCLI(profile_store=ProfileStore(tmp_path / "config.json"))
+    cli = InteractiveCLI(workspace=tmp_path, data_root=tmp_path / "data", profile_store=ProfileStore(tmp_path / "config.json"))
     first = Selection(ProviderConfig(provider="custom", context_window_tokens=1048576), get_preset("custom"))
     cli._activate_selection(first)
     unknown = Selection(ProviderConfig(provider="custom"), get_preset("custom"))

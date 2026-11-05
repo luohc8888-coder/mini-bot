@@ -126,3 +126,44 @@ tests/test_memory_acceptance.py     12 passed
 - 建议 5（checkpoint ID 歧义）：改为 JSON 数组序列化后哈希；同步更新既有测试。
 - 建议 6（预算提示重复统计）：改为 `System Prompt X（其中 Long-term Memory Y）`。
 - 修复后全量测试：**396 passed, 0 failed**。
+
+## 6. 本轮复核与补充修复（2026-11-05）
+
+在工作区现有修复基础上补齐以下行为，保留前述 QA 的历史结论：
+
+- **B-1**：区分临时失败与稳定失败。Provider 临时失败继续指数退避，计时从失败完成时开始；摘要未减少 Token、完整轮次放不进摘要预算时，Session 指纹不变就不再自动重试。新回合保存后恢复尝试，手动 `/compact` 不受后台退避限制。
+- **B-2**：陈旧 cursor 只改变本次历史读取起点，不在调用 LLM 前提前写成 0。Provider 失败、非法响应或禁用本次处理时，旧 cursor 保持不变；成功后才持久化处理到的新 cursor。
+- **建议 1**：补归档移到新版摘要生成之前。即使归档失败后有新回合到来，也先幂等归档旧 checkpoint；补偿失败则保留旧检查点，不调用摘要模型，不覆盖恢复入口。
+- **建议 2**：已有后续 user 的历史失败轮次允许进入摘要，明确标注“未产生最终回答”。最新未完成轮次仍保留，非法工具协议仍不放行；原始消息与工具配对均不改写。
+- **建议 3**：Dream 按模型窗口及 CLI 上下文配置计算输入预算，按实际剩余窗口限制输出。完整归档按连续前缀分批；超大单条归档分片覆盖全部正文，所有片段成功后统一提交记忆及 cursor。长期记忆仅裁剪发送副本，完整文档用于操作校验和去重；提示本身放不下时不请求模型。有效 JSON 若带输出截断结束原因，也按失败处理。
+- **建议 4**：补充 `( nothing )；` 等空白和标点变体；建议 5、6、7 的既有修复继续通过回归。
+- **并发请求预算**：新增 Provider 协程作用域输出额度，Dream 与主对话共用连接时互不覆盖，异常和取消后恢复；进行中的 Dream 固定使用启动时的 Provider。
+
+验证：新增 **20 项回归用例**，覆盖失败轮次、跨新回合补归档、真实时间推进的退避、陈旧 cursor 失败恢复、分片完整性与统一提交、预算不足、输出截断，以及 OpenAI-compatible / Anthropic 模拟 HTTP 请求预算与协程隔离。
+
+```text
+.venv/bin/python -m pytest -q
+418 passed in 6.54s
+
+.venv/bin/python -m mini_harness --demo
+结果是 5
+
+git diff --check
+通过
+```
+
+本轮验证使用本地测试与模拟 HTTP，不包含真实模型调用。
+
+## 7. 结构与旧兼容清理后的回归（2026-11-05）
+
+前述 QA 核对表记录当时的实现快照；本节为后续结构清理后的状态。
+
+- 删除根目录 `main.py`、`agent/prompt.py`、`session/workspace.py` 及相关旧导出；统一模板、Workspace 和 CLI 入口。
+- 删除重复的请求快照字段和 CLI 无状态交互循环。正式 CLI 始终绑定 Session；离线 demo 显式使用 `stateless=True`。
+- `ContextCompactor.compact()` 统一返回 `CompactionOutcome`；去掉 `last_outcome` 和两类返回值适配。预算 Governor、Token/消息处理、共享 transcript 独立成模块。
+- CLI 渲染/设置/维护生命周期、Memory 文档操作/调度、AddTool 示例按职责分开；不保留旧模块转导。
+- Session 正常加载严格使用 schema v2。旧 v1 数据通过 `--migrate-session` 单独校验、备份和原子迁移；当前工作区的 102 条消息和已有摘要已核对保留。
+- 原有功能测试覆盖保留；新增 18 项迁移测试及 2 项显式无状态模式约束测试。
+- 全量 **438 passed**；模块入口与已安装的 `mini-bot --demo` 均返回 `结果是 5`；差异格式检查通过。
+
+完整目录、接口与迁移说明见 [代码结构与兼容清理结果](code_structure_and_compatibility.md)。

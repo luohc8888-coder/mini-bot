@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
@@ -20,6 +22,11 @@ ToolDefinition = dict[str, Any]
 TextDeltaCallback = Callable[[str], None]
 # 工具开始执行回调，CLI 可用于在流式输出中插入工具提示。
 ToolStartCallback = Callable[[str], None]
+
+# 后台维护与主对话共用 Provider；单次请求的输出额度不能互相覆盖。
+_OUTPUT_BUDGET: ContextVar[tuple[object, int] | None] = ContextVar(
+    "provider_output_budget", default=None
+)
 
 
 class ProviderError(RuntimeError):
@@ -77,6 +84,9 @@ class LLMResponse:
         finish_reason: Provider 给出的结束原因，V0 仅作记录。
         reasoning_content: 需要回放的 Provider 推理/续接内容（如 DeepSeek
             thinking）；只用于协议续接，不展示给最终用户。
+        usage: Provider 返回的原始 Token 用量（如 OpenAI 的
+            ``prompt_tokens`` / ``completion_tokens``）；不支持的 Provider
+            保持空字典，调用方不能假定其一定存在。
 
     Returns:
         供 AgentRunner 判断是否继续工具循环的响应对象。
@@ -91,6 +101,7 @@ class LLMResponse:
     tool_calls: list[ToolCallRequest] = field(default_factory=list)
     finish_reason: str = "stop"
     reasoning_content: str | None = None
+    usage: dict[str, Any] = field(default_factory=dict)
 
     @property
     def has_tool_calls(self) -> bool:
@@ -121,6 +132,9 @@ class LLMProvider(ABC):
     @property
     def output_token_limit(self) -> int:
         """当前请求额度；与配置的最大输出能力分开保存。"""
+        override = _OUTPUT_BUDGET.get()
+        if override is not None and override[0] is self:
+            return min(self.max_output_tokens, override[1])
         if self._request_output_limit is None:
             return self.max_output_tokens
         return min(self.max_output_tokens, self._request_output_limit)
@@ -129,6 +143,16 @@ class LLMProvider(ABC):
         """ContextGovernor 在每次请求前设置有效输出额度。"""
         validate_max_output_tokens(value)
         self._request_output_limit = min(value, self.max_output_tokens)
+
+    @contextmanager
+    def request_output_budget(self, value: int) -> Iterator[None]:
+        """仅在当前协程内覆盖输出额度，退出/异常/取消后自动恢复。"""
+        validate_max_output_tokens(value)
+        token = _OUTPUT_BUDGET.set((self, value))
+        try:
+            yield
+        finally:
+            _OUTPUT_BUDGET.reset(token)
 
     @abstractmethod
     async def chat(

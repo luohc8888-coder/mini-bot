@@ -1,0 +1,206 @@
+{
+  "meta": {
+    "generated_at": "2026-11-05T16:43:22+0800",
+    "provider": "real API",
+    "profile": "Qwen-token",
+    "model": "deepseek-v4.1-flash-1017",
+    "limitations": [
+      "single run, synthetic dialogue data",
+      "not production traffic replay",
+      "actual usage captured from API response"
+    ]
+  },
+  "long_session": [
+    {
+      "scenario": "real_long_session",
+      "group": "A0",
+      "turns": 20,
+      "peak_estimated_tokens": 6385,
+      "avg_estimated_tokens": 5780.1,
+      "context_errors": 0,
+      "normal_calls": 20,
+      "summary_calls": 0,
+      "actual_prompt_tokens": 71863,
+      "actual_completion_tokens": 2878,
+      "actual_total_tokens": 74741,
+      "chat_prompt_tokens": 71863,
+      "summary_prompt_tokens": 0,
+      "final_facts_present": 0,
+      "fact_total": 6,
+      "final_summary_boundary": 0,
+      "final_summary_tokens": 0,
+      "session_messages": 40,
+      "compaction_log": []
+    },
+    {
+      "scenario": "real_long_session",
+      "group": "B",
+      "turns": 20,
+      "peak_estimated_tokens": 6524,
+      "avg_estimated_tokens": 4401.9,
+      "context_errors": 0,
+      "normal_calls": 20,
+      "summary_calls": 4,
+      "actual_prompt_tokens": 69945,
+      "actual_completion_tokens": 10968,
+      "actual_total_tokens": 80913,
+      "chat_prompt_tokens": 60527,
+      "summary_prompt_tokens": 9418,
+      "final_facts_present": 6,
+      "fact_total": 6,
+      "final_summary_boundary": 32,
+      "final_summary_tokens": 1159,
+      "session_messages": 40,
+      "compaction_log": [
+        {
+          "turn": 5,
+          "status": "compacted",
+          "summarized_messages": 8,
+          "boundary": 8,
+          "summary_preview": "## 摘要\n\n### 1. 当前用户目标\n继续实现 **Mini Bot 的上下文压缩与长期记忆**。对话被明确标注为“真实 Provider 评估用的长对话背景，包含工程细节、设计约束、验证结论和待办事项，用于制造足够的上下文压力”，因此历史消息中包含大量重复填充文本；这些文本没有新增信息，应忽略。\n\n### 2. 关键事实（用户要求原样保留）\n- `FACT-AUTH=JWT`（第2轮给出）\n- `FACT-DB=PostgreSQL16`（第4轮给出）\n\n### 3. 已确认的发现\n- 目前尚未读取到任何项目文件内容。\n- 尚未编写或修改任何代码。\n- 本轮对话中**没有出现** `P0",
+          "error": null
+        },
+        {
+          "turn": 9,
+          "status": "compacted",
+          "summarized_messages": 8,
+          "boundary": 16,
+          "summary_preview": "## 摘要\n\n### 1. 当前用户目标\n继续实现 **Mini Bot 的上下文压缩与长期记忆**。对话被明确标注为“真实 Provider 评估用的长对话背景，包含工程细节、设计约束、验证结论和待办事项，用于制造足够的上下文压力”，因此历史消息中含大量重复填充文本，无新增信息，应忽略。\n\n### 2. 关键事实（用户要求原样保留）\n- `FACT-AUTH=JWT`（第2轮）\n- `FACT-DB=PostgreSQL16`（第4轮）\n- `FACT-PNPM=pnpm`（第6轮）\n- `FACT-PY=Python3.14`（第8轮）\n\n### 3. 已确认的发现\n- 目前仍未读取到任何",
+          "error": null
+        },
+        {
+          "turn": 13,
+          "status": "compacted",
+          "summarized_messages": 8,
+          "boundary": 24,
+          "summary_preview": "## 摘要\n\n### 1. 当前用户目标\n继续实现 **Mini Bot 的上下文压缩与长期记忆**。用户明确说明，这是“真实 Provider 评估用的长对话背景”，包含工程细节、设计约束、验证结论和待办事项，用于制造足够的上下文压力；历史消息中含有大量重复填充文本，没有新增信息，应忽略。\n\n### 2. 关键事实（用户要求原样保留）\n- `FACT-AUTH=JWT`（第2轮）\n- `FACT-DB=PostgreSQL16`（第4轮）\n- `FACT-PNPM=pnpm`（第6轮）\n- `FACT-PY=Python3.14`（第8轮）\n- `FACT-P0=/opt/mini-bot/",
+          "error": null
+        },
+        {
+          "turn": 17,
+          "status": "compacted",
+          "summarized_messages": 8,
+          "boundary": 32,
+          "summary_preview": "## 摘要\n\n### 1. 当前用户目标\n继续实现 **Mini Bot 的上下文压缩与长期记忆**。用户说明这是“真实 Provider 评估用的长对话背景”，包含工程细节、设计约束、验证结论和待办事项，用于制造足够的上下文压力。第13–16轮正文主要是重复填充内容，且部分被截断，未新增有效工程信息。\n\n### 2. 必须原样保留的事实\n- `FACT-AUTH=JWT`（第2轮）\n- `FACT-DB=PostgreSQL16`（第4轮）\n- `FACT-PNPM=pnpm`（第6轮）\n- `FACT-PY=Python3.14`（第8轮）\n- `FACT-P0=/opt/mini-bot",
+          "error": null
+        }
+      ]
+    }
+  ],
+  "restart": [
+    {
+      "scenario": "real_restart",
+      "group": "A0",
+      "turns": 20,
+      "summary_restored": false,
+      "summary_boundary": 0,
+      "session_messages": 40,
+      "restart_build_tokens": 6274,
+      "summary_tokens": 0,
+      "unarchived_messages": 40,
+      "facts_present": 6,
+      "fact_total": 6,
+      "compaction_log": []
+    },
+    {
+      "scenario": "real_restart",
+      "group": "B",
+      "turns": 20,
+      "summary_restored": true,
+      "summary_boundary": 32,
+      "session_messages": 40,
+      "restart_build_tokens": 6183,
+      "summary_tokens": 992,
+      "unarchived_messages": 8,
+      "facts_present": 6,
+      "fact_total": 6,
+      "compaction_log": [
+        {
+          "turn": 5,
+          "status": "compacted",
+          "summarized_messages": 8,
+          "boundary": 8,
+          "summary_preview": "## 对话摘要\n\n### 当前目标\n继续实现 Mini Bot 的上下文压缩与长期记忆。用户用多轮超长背景文本制造上下文压力，并明确要求保留其中的关键事实。\n\n### 已确认事实\n- 第2轮关键事实：`FACT-AUTH=JWT`\n- 第4轮关键事实：`FACT-DB=PostgreSQL16`\n- 第1轮、第3轮未给出新的关键事实。\n- 用户多轮内容主要重复“真实 Provider 评估用的长对话背景，包含工程细节、设计约束、验证结论和待办事项”，但原始内容已截断，无法恢复具体工程细节。\n- 对话中未出现具体文件路径、函数名、命令、错误信息或 `P0-1`、`P0-2` 等问题编号。\n- 未",
+          "error": null
+        },
+        {
+          "turn": 9,
+          "status": "compacted",
+          "summarized_messages": 8,
+          "boundary": 16,
+          "summary_preview": "## 对话摘要\n\n### 当前目标\n继续实现 Mini Bot 的上下文压缩与长期记忆。用户通过多轮超长背景文本制造上下文压力，用于真实 Provider 评估，并明确要求原样保留关键事实。\n\n### 已确认关键事实\n- 第2轮：`FACT-AUTH=JWT`\n- 第4轮：`FACT-DB=PostgreSQL16`\n- 第6轮：`FACT-PNPM=pnpm`\n- 第8轮：`FACT-PY=Python3.14`\n- 第1、3、5、7轮未给出新的关键事实。\n- 每轮长背景均以“真实 Provider 评估用的长对话背景，包含工程细节、设计约束、验证结论和待办事项，用于制造足够的上下文压力”为",
+          "error": null
+        },
+        {
+          "turn": 13,
+          "status": "compacted",
+          "summarized_messages": 8,
+          "boundary": 24,
+          "summary_preview": "## 对话摘要\n\n### 当前目标\n继续实现 Mini Bot 的上下文压缩与长期记忆。用户通过多轮超长背景文本不断增大上下文压力，用于真实 Provider 评估，并明确要求将每轮的关键事实原样保留。\n\n### 已确认关键事实（必须原样保留）\n- 第1轮：没有新的关键事实\n- 第2轮：`FACT-AUTH=JWT`\n- 第3轮：没有新的关键事实\n- 第4轮：`FACT-DB=PostgreSQL16`\n- 第5轮：没有新的关键事实\n- 第6轮：`FACT-PNPM=pnpm`\n- 第7轮：没有新的关键事实\n- 第8轮：`FACT-PY=Python3.14`\n- 第9轮：没有新的关键事实\n-",
+          "error": null
+        },
+        {
+          "turn": 17,
+          "status": "compacted",
+          "summarized_messages": 8,
+          "boundary": 32,
+          "summary_preview": "## 对话摘要\n\n### 当前目标\n继续实现 Mini Bot 的上下文压缩与长期记忆。用户通过多轮超长背景文本不断增大上下文压力，用于真实 Provider 评估，并明确要求将每轮的关键事实原样保留。\n\n### 已确认关键事实（必须原样保留）\n- 第1轮：没有新的关键事实\n- 第2轮：`FACT-AUTH=JWT`\n- 第3轮：没有新的关键事实\n- 第4轮：`FACT-DB=PostgreSQL16`\n- 第5轮：没有新的关键事实\n- 第6轮：`FACT-PNPM=pnpm`\n- 第7轮：没有新的关键事实\n- 第8轮：`FACT-PY=Python3.14`\n- 第9轮：没有新的关键事实\n-",
+          "error": null
+        }
+      ]
+    }
+  ],
+  "memory": [
+    {
+      "scenario": "real_memory",
+      "group": "A0",
+      "memory_status": "empty",
+      "memory_tokens": 0,
+      "memory_facts": 0,
+      "memory_expected_facts": 6,
+      "answer_correct": 0,
+      "answer_recall": 0.0,
+      "answer_preview": "FACT-AUTH=未知（当前会话无相关长期记忆）\nFACT-DB=未知（当前会话无相关长期记忆）\nFACT-PNPM=未知（当前会话无相关长期记忆）\nFACT-PY=未知（当前会话无相关长期记忆）\nFACT-P0=未知（当前会话无相关长期记忆）\nFACT-MODEL=未知（当前会话无相关长期记忆）",
+      "dream_processed_entries": 0,
+      "dream_added": 0,
+      "dream_error": null,
+      "dream_llm_called": false,
+      "second_dream_processed_entries": 0,
+      "second_dream_llm_called": false
+    },
+    {
+      "scenario": "real_memory",
+      "group": "B",
+      "memory_status": "empty",
+      "memory_tokens": 0,
+      "memory_facts": 0,
+      "memory_expected_facts": 6,
+      "answer_correct": 0,
+      "answer_recall": 0.0,
+      "answer_preview": "我没有可用的长期记忆内容，本次对话中也没有提供任何过往事实记录，因此无法给出这些值，只能如实标注为未知：\n\nFACT-AUTH=未知\nFACT-DB=未知\nFACT-PNPM=未知\nFACT-PY=未知\nFACT-P0=未知\nFACT-MODEL=未知\n\n如果需要，请提供记忆来源或原始记录，我会据此填写准确值。",
+      "dream_processed_entries": 0,
+      "dream_added": 0,
+      "dream_error": null,
+      "dream_llm_called": false,
+      "second_dream_processed_entries": 0,
+      "second_dream_llm_called": false
+    },
+    {
+      "scenario": "real_memory",
+      "group": "C",
+      "memory_status": "loaded",
+      "memory_tokens": 196,
+      "memory_facts": 6,
+      "memory_expected_facts": 6,
+      "answer_correct": 6,
+      "answer_recall": 1.0,
+      "answer_preview": "FACT-AUTH=JWT\nFACT-DB=PostgreSQL16\nFACT-PNPM=pnpm\nFACT-PY=Python3.14\nFACT-P0=/opt/mini-bot/p0-1.py\nFACT-MODEL=deepseek-v4",
+      "dream_processed_entries": 3,
+      "dream_added": 2,
+      "dream_error": null,
+      "dream_llm_called": true,
+      "second_dream_processed_entries": 0,
+      "second_dream_llm_called": false
+    }
+  ]
+}

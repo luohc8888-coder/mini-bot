@@ -1,6 +1,7 @@
 """交互式 CLI 包。"""
 
-from .app import Console, InteractiveCLI, print_provider_catalog, run_interactive_cli
+from .app import InteractiveCLI, run_interactive_cli
+from .console import Console, print_provider_catalog
 from .profiles import ProfileStore, ProfileStoreError, ProviderProfile
 
 __all__ = [

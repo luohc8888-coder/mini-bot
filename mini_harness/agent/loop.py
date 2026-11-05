@@ -18,11 +18,8 @@ from mini_harness.providers import ProviderError
 from mini_harness.providers.base import TextDeltaCallback, ToolStartCallback
 from mini_harness.session import Session, SessionError, SessionManager
 
-from .context import (
-    ContextBudgetExceeded,
-    ContextBuilder,
-    ContextConfig,
-)
+from .context_types import ContextBudgetExceeded, ContextConfig
+from .context import ContextBuilder
 from .runner import AgentRunSpec, AgentRunner
 
 logger = logging.getLogger(__name__)
@@ -35,7 +32,7 @@ class AgentLoop:
         bus: MessageBus，提供入站/出站队列。
         runner: AgentRunner，负责一次完整的工具调用循环。
         max_iterations: 每个消息交给 Runner 时的最大模型调用轮数。
-        poll_interval: 无消息时等待多久检查一次停止标记。V0 用短超时
+        poll_interval: 无消息时等待多久检查一次停止标记。使用短超时
             实现可正常退出的常驻循环，不引入 Session 队列或后台任务。
         on_text_delta: 可选的流式文本回调；CLI 用它实时渲染 Token。
         on_tool_start: 可选的工具开始回调；CLI 用来在流式文本之间穿插工具提示。
@@ -44,16 +41,17 @@ class AgentLoop:
             ``runner.tools.get_definitions()`` 自动创建一个。
         context_config: 自动创建 ContextBuilder 时使用的预算配置；默认
             ``ContextConfig()``。
+        stateless: 显式启用离线无状态运行，与 SessionManager 互斥。
         memory_store: 可选的 MemoryStore。传入时 ContextBuilder 会把
             ``MEMORY.md`` 注入 System Prompt；不传且启用 Session 时自动创建
             ``<workspace>/memory`` 下的默认 MemoryStore。
 
     上下游:
-        main.py 创建并 ``asyncio.create_task(agent_loop.run())``；CLI 通过
+        CLI 创建并 ``asyncio.create_task(agent_loop.run())``；CLI 通过
         MessageBus 投递 InboundMessage。
 
         ``session_manager`` 为可选参数：传入时启用 V1 Session 历史加载、
-        更新和原子持久化；不传时保持 V0 的单轮无状态行为。
+        更新和原子持久化；无会话的离线任务须显式指定 ``stateless=True``。
     """
 
     def __init__(
@@ -64,6 +62,7 @@ class AgentLoop:
         max_iterations: int = 32,
         poll_interval: float = 0.1,
         session_manager: SessionManager | None = None,
+        stateless: bool = False,
         context_builder: ContextBuilder | None = None,
         context_config: ContextConfig | None = None,
         memory_store: object | None = None,
@@ -71,6 +70,10 @@ class AgentLoop:
         on_tool_start: ToolStartCallback | None = None,
     ) -> None:
         """保存依赖并初始化运行状态。"""
+        if session_manager is None and not stateless:
+            raise ValueError("AgentLoop 需要 SessionManager；离线运行须显式设置 stateless=True")
+        if session_manager is not None and stateless:
+            raise ValueError("stateless=True 不能同时指定 SessionManager")
         self.bus = bus
         self.runner = runner
         self._max_iterations = max_iterations
@@ -92,8 +95,8 @@ class AgentLoop:
             except Exception:  # noqa: BLE001 - 记忆不可用不能阻止基础对话
                 logger.exception("初始化长期记忆存储失败，本轮不注入 Memory")
         if self._context_builder is None and session_manager is not None:
-            # V2 只在 Session 模式构建上下文；V0 的 demo 路径继续保持
-            # “单条 user 消息直接交给 Runner”的兼容行为。
+            # V2 只在 Session 模式构建上下文；显式 stateless demo 路径使用
+            # 单条 user 消息直接交给 Runner 的执行方式。
             effective_context_config = context_config
             if effective_context_config is None:
                 effective_context_config = ContextConfig.from_provider(
@@ -124,12 +127,12 @@ class AgentLoop:
 
     @property
     def session_manager(self) -> SessionManager | None:
-        """返回注入的 SessionManager；V0 模式下为 None。"""
+        """返回注入的 SessionManager；显式 stateless 模式下为 None。"""
         return self._session_manager
 
     @property
     def context_builder(self) -> ContextBuilder | None:
-        """返回当前使用的 ContextBuilder；V0 模式下为 None。"""
+        """返回当前使用的 ContextBuilder；显式 stateless 模式下为 None。"""
         return self._context_builder
 
     async def run(self) -> None:
@@ -139,7 +142,7 @@ class AgentLoop:
             None；通过设置内部 ``_running=False`` 正常退出。
 
         上下游:
-            main.py 用 asyncio.create_task 启动本协程。为什么要 create_task：
+            CLI 用 asyncio.create_task 启动本协程。为什么要 create_task：
             ``run`` 是常驻循环，如果直接 await 会阻塞 CLI 投递消息和读取
             结果；创建任务后，CLI 与 AgentLoop 可以借助 asyncio.Queue 并发
             协作。
@@ -167,7 +170,7 @@ class AgentLoop:
                     # 超时表示暂时没有消息；continue 重新检查运行标记。
                     continue
 
-                # await 单条消息处理，V0 顺序处理，不并发执行多个回合。
+                # await 单条消息处理，单消费者顺序处理，不并发执行多个回合。
                 await self._dispatch_inbound(message)
         finally:
             # 无论正常 stop 还是异常/cancel，都复位状态，便于测试判断
@@ -177,8 +180,8 @@ class AgentLoop:
     def stop(self) -> None:
         """请求 AgentLoop 在下次检查时退出。
 
-        V0 的 consume 最多等待 ``poll_interval`` 秒；调用 stop 后
-        main.py 应 ``await loop_task``，确保协程真正结束再退出进程。
+        无状态任务的 consume 最多等待 ``poll_interval`` 秒；调用 stop 后
+        CLI 应 ``await loop_task``，确保协程真正结束再退出进程。
         即使 stop 在 run task 首次调度前调用，也会被保留并在启动时检查。
         """
         self._stop_requested = True

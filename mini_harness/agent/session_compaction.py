@@ -24,23 +24,12 @@ from typing import Any
 from mini_harness.memory.store import MemoryStore
 from mini_harness.session.manager import Session, SessionManager
 
-from .compaction import (
-    SUMMARY_SYSTEM_PROMPT,
-    CompactionOutcome,
-    ContextCompactor,
-    _content_text,
-    _json_text,
-    _tool_call_index,
-    _tool_call_name,
-    _truncate_head_tail,
-)
-from .context import (
-    ContextConfig,
-    _is_valid_turn,
-    _split_history_into_turns,
-    estimate_tokens,
-    truncate_text_to_token_budget,
-)
+from .compaction import SUMMARY_SYSTEM_PROMPT, CompactionOutcome, ContextCompactor
+from .messages import _content_text, _tool_call_index, _is_valid_turn, _split_history_into_turns
+from .context_types import ContextConfig
+from .tokens import estimate_tokens
+
+from .transcript import transcript_token_limit, render_transcript_entry, render_prior_summary
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +75,7 @@ class PersistentCompactionResult:
         checkpoint_id: 由 session key + boundary + summary 派生的稳定 ID。
         archive_cursor: Memory Archive 记录的 cursor；未归档/失败时为 None。
         error: 失败原因；Session 已保存但归档失败时也会携带归档错误。
+        retryable: 输入不变时是否值得自动重试；稳定失败只在 Session 变化后重试。
     """
 
     ok: bool
@@ -97,25 +87,27 @@ class PersistentCompactionResult:
     checkpoint_id: str | None = None
     archive_cursor: int | None = None
     error: str | None = None
+    retryable: bool = True
 
 
 def _complete_turn_groups(
     messages: list[dict[str, Any]],
 ) -> list[list[dict[str, Any]]]:
-    """选择从开头起连续的、以最终 assistant 回答收尾的完整用户轮次。
+    """选择从开头起连续的、已结束的用户轮次。
 
     规则：
     - 复用 :func:`_split_history_into_turns` 按 user 消息切分；
     - 每个轮次必须通过 :func:`_is_valid_turn`（工具调用/结果完整配对）；
-    - 轮次最后一条必须是 ``assistant`` 且没有 ``tool_calls``，即模型已经
-      给出最终回答；
-    - 遇到第一个不完整/非法轮次立即停止，当前未完成请求永远不进入摘要。
+    - 最后一轮必须以最终 assistant 回答收尾，当前未完成请求不进入摘要；
+    - 已有下一条 user 的旧失败轮次可归档，但明确标注未产生最终回答；
+    - 非法工具协议仍然停止，不伪造工具结果或改写原始消息。
 
     返回按消息顺序排列的轮次列表（每项是一轮的消息），便于调用方按完整
     轮次边界选择“可完整摘要的前缀”。
     """
     selected: list[list[dict[str, Any]]] = []
-    for turn in _split_history_into_turns(messages):
+    turns = _split_history_into_turns(messages)
+    for index, turn in enumerate(turns):
         if not _is_valid_turn(turn):
             break
         last_message = turn[-1]
@@ -125,7 +117,15 @@ def _complete_turn_groups(
             last_message.get("role") != "assistant"
             or last_message.get("tool_calls")
         ):
-            break
+            if index == len(turns) - 1:
+                break
+            # 新 user 已开始，旧轮次已结束；只在摘要副本中加注释，消息条数
+            # 保持一致，确保 boundary 仍按原始消息数推进。
+            turn = deepcopy(turn)
+            turn[0]["content"] = (
+                "[此历史轮次未产生最终回答；仅记录请求及已执行工具，"
+                "不得推断任务已完成。]\n" + _content_text(turn[0])
+            )
         selected.append(turn)
     return selected
 
@@ -137,76 +137,6 @@ def _complete_turns(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for turn in _complete_turn_groups(messages)
         for message in turn
     ]
-
-
-def _summary_transcript_max_tokens(
-    summary_system_prompt: str,
-    budget: int,
-) -> int:
-    """复刻 ``ContextCompactor._build_transcript`` 的 transcript Token 上限。"""
-    prompt_overhead = estimate_tokens(summary_system_prompt) + 128
-    effective_budget = max(int(budget), 0)
-    return max(
-        64,
-        min(
-            max(128, int(effective_budget * 0.55)),
-            max(64, effective_budget - prompt_overhead),
-        ),
-    )
-
-
-def _render_transcript_entry(
-    message: Any,
-    *,
-    assistant_cap: int,
-    call_index: dict[str, Any],
-) -> str:
-    """按 ``ContextCompactor._build_transcript`` 的规则渲染一条消息条目。
-
-    这里必须与 ``_build_transcript`` 的截断上限保持一致：user ≤ 500 tokens、
-    tool ≤ 300 tokens、assistant ≤ ``assistant_cap`` tokens，tool call 参数按
-    字符截断 300；只有完全复刻这些上限，才能保证被选中的轮次真实完整地进入
-    摘要输入，而不是被 ``_build_transcript`` 静默丢弃/截断。
-    """
-    if not isinstance(message, dict):
-        return (
-            "[unknown]\n"
-            + truncate_text_to_token_budget(str(message), 200)
-        )
-    role = str(message.get("role", "unknown"))
-    if role == "tool":
-        call_id = str(message.get("tool_call_id") or "")
-        name = str(message.get("name") or "")
-        if not name and call_id in call_index:
-            name = call_index[call_id].name
-        content = truncate_text_to_token_budget(_content_text(message), 300)
-        return f"[tool:{name or 'unknown'}]\n{content}"
-    if role == "assistant":
-        content = _truncate_head_tail(
-            _content_text(message),
-            assistant_cap,
-            "\n\n[... assistant 中间内容已截断 truncated ...]\n\n",
-        )
-        lines = ["[assistant]", content]
-        tool_calls = message.get("tool_calls") or []
-        if tool_calls:
-            rendered_calls = []
-            for call in tool_calls:
-                name = _tool_call_name(call) or "unknown"
-                arguments = call.get("arguments")
-                arguments_text = _json_text(arguments)
-                if len(arguments_text) > 300:
-                    arguments_text = arguments_text[:300] + "…"
-                rendered_calls.append(f"{name}({arguments_text})")
-            lines.append(
-                "[assistant tool_calls] " + "; ".join(rendered_calls)
-            )
-        return "\n".join(lines)
-    content = truncate_text_to_token_budget(
-        _content_text(message),
-        500 if role == "user" else 300,
-    )
-    return f"[{role}]\n{content}"
 
 
 def _generate_checkpoint_id(
@@ -263,12 +193,7 @@ class SessionCompactor:
         # __init__ 期间也走一遍 setter：注入的 compactor 可能仍绑定旧
         # provider，构造后必须与当前 provider 保持一致。
         self.provider = provider
-        session_path = getattr(session_manager, "path", None)
-        self._lock_key = (
-            str(session_path)
-            if session_path is not None
-            else str(getattr(session_manager, "session_key", "default"))
-        )
+        self._lock_key = str(session_manager.path)
 
     @property
     def provider(self) -> Any:
@@ -290,7 +215,7 @@ class SessionCompactor:
     # ------------------------------------------------------------------
 
     def has_unarchived_history(self, session: Session | None = None) -> bool:
-        """是否存在至少一个完整、未归档的用户轮次。
+        """是否存在已结束的未归档轮次，或尚未补偿归档的 checkpoint。
 
         Args:
             session: 已加载的 Session；None 时从 ``session_manager`` 读取。
@@ -330,9 +255,9 @@ class SessionCompactor:
             return False
         try:
             return not self.memory_store.has_checkpoint(checkpoint_id)
-        except Exception:  # noqa: BLE001 - 查询失败按“无待归档”处理
+        except Exception:  # noqa: BLE001 - 交给 compact 报错并由调度器退避
             logger.warning("检查 Memory Archive 检查点失败", exc_info=True)
-            return False
+            return True
 
     # ------------------------------------------------------------------
     # 压缩
@@ -384,8 +309,11 @@ class SessionCompactor:
         messages = session.messages
         boundary = session.summary_boundary
         turn_groups = _complete_turn_groups(messages[boundary:])
-        if not turn_groups:
-            if self._has_pending_archive(session):
+        # 先补偿旧 checkpoint，再生成新版摘要；否则新回合到来后旧摘要会被
+        # 覆盖，丢失唯一可恢复的归档入口。append_history 本身按 ID 幂等。
+        archive_cursor: int | None = None
+        if self.memory_store is not None and session.summary_checkpoint_id:
+            if session.summary.strip():
                 try:
                     archive_cursor = self.memory_store.append_history(
                         session.summary,
@@ -406,6 +334,8 @@ class SessionCompactor:
                             f"{type(exc).__name__}: {exc}"
                         ),
                     )
+        if not turn_groups:
+            if archive_cursor is not None:
                 return PersistentCompactionResult(
                     ok=True,
                     status="nothing_to_compact",
@@ -424,7 +354,7 @@ class SessionCompactor:
 
         # ContextCompactor 的 _build_transcript 在超出预算时会丢掉最旧条目
         # （只保留最近内容）。如果直接传入全部轮次，boundary 会把没有被
-        # 摘要覆盖的消息也标记为已归档。这里只选择“能完整放进 transcript”
+        # 摘要覆盖的消息也标记为已归档。这里只选择“能完整放进共享 transcript”
         # 的连续轮次前缀，剩余轮次留给下一次压缩。
         prefix_messages = self._select_summary_prefix(session, turn_groups)
         if not prefix_messages:
@@ -437,11 +367,12 @@ class SessionCompactor:
                     "摘要输入预算不足以完整覆盖任何完整轮次，"
                     "已跳过本次压缩"
                 ),
+                retryable=False,
             )
 
         summary_input = self._build_summary_input(session, prefix_messages)
         try:
-            raw_outcome = await self.compactor.compact(
+            outcome = await self.compactor.compact(
                 summary_input,
                 self.context_config.available_input_tokens,
                 protected_start=len(summary_input),
@@ -455,8 +386,7 @@ class SessionCompactor:
                 error=f"摘要调用失败：{type(exc).__name__}: {exc}",
             )
 
-        outcome = self._resolve_outcome(raw_outcome)
-        if outcome is None:
+        if not isinstance(outcome, CompactionOutcome):
             return PersistentCompactionResult(
                 ok=False,
                 status="failed",
@@ -469,6 +399,7 @@ class SessionCompactor:
                 status="failed",
                 reason=reason,
                 error=outcome.error or "摘要未生成",
+                retryable=outcome.retryable,
             )
 
         summary_text = outcome.summary_text
@@ -550,22 +481,6 @@ class SessionCompactor:
             error=archive_error,
         )
 
-    def _resolve_outcome(
-        self,
-        raw_outcome: Any,
-    ) -> CompactionOutcome | None:
-        """兼容 ``ContextCompactor.compact`` 的两种返回形式。
-
-        默认返回消息列表，具体结果在 ``self.compactor.last_outcome``；也允许
-        自定义 Compactor 直接返回 ``CompactionOutcome``。
-        """
-        if isinstance(raw_outcome, CompactionOutcome):
-            return raw_outcome
-        outcome = getattr(self.compactor, "last_outcome", None)
-        if isinstance(outcome, CompactionOutcome):
-            return outcome
-        return None
-
     def _select_summary_prefix(
         self,
         session: Session,
@@ -577,7 +492,7 @@ class SessionCompactor:
         （user ≤ 500、tool ≤ 300 tokens，assistant 按 max_tokens 的 60% 且
         限制在 800..4000，tool call 参数按 300 字符），并在 transcript 超
         预算时丢弃最旧条目。为避免“LLM 没看到却被标记已归档”，这里用完全
-        相同的渲染规则预先估算：只有整轮渲染后仍不超过 transcript 上限的
+        共享的渲染函数预先估算：只有整轮渲染后仍不超过 transcript 上限的
         连续前缀才会被送入摘要。若第一轮都放不下则返回空列表。
         """
         budget = self.context_config.available_input_tokens
@@ -588,7 +503,7 @@ class SessionCompactor:
         )
         if not isinstance(summary_system_prompt, str) or not summary_system_prompt:
             summary_system_prompt = SUMMARY_SYSTEM_PROMPT
-        max_tokens = _summary_transcript_max_tokens(
+        max_tokens = transcript_token_limit(
             summary_system_prompt,
             budget,
         )
@@ -599,8 +514,7 @@ class SessionCompactor:
         if isinstance(previous_summary, str) and previous_summary.strip():
             # 与 _build_transcript 对 prior_summaries 的渲染完全一致。
             entries.append(
-                "[Earlier compacted summary — preserve these facts]\n"
-                + previous_summary
+                render_prior_summary(previous_summary)
             )
 
         selected: list[dict[str, Any]] = []
@@ -610,7 +524,7 @@ class SessionCompactor:
             candidate_entries = [
                 *entries,
                 *[
-                    _render_transcript_entry(
+                    render_transcript_entry(
                         message,
                         assistant_cap=assistant_cap,
                         call_index=call_index,

@@ -17,7 +17,7 @@ from mini_harness.providers import (
     OpenAICompatibleProvider,
 )
 from mini_harness.providers.base import LLMResponse
-from mini_harness.tools import AddTool, ToolRegistry
+from mini_harness.tools import ToolRegistry
 
 
 def _sse(*events: dict) -> bytes:

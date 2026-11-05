@@ -1,4 +1,4 @@
-"""工具注册表与 V0 唯一的 add 工具。"""
+"""工具注册、参数校验与受限执行。"""
 
 from __future__ import annotations
 
@@ -9,43 +9,10 @@ from typing import Any
 from .base import Tool, ToolResult
 
 
-class AddTool(Tool):
-    """计算两个数字之和的示例工具。"""
-
-    name = "add"
-    description = "计算两个数字的和"
-    parameters = {
-        "type": "object",
-        "properties": {
-            "a": {"type": "number", "description": "第一个加数"},
-            "b": {"type": "number", "description": "第二个加数"},
-        },
-        "required": ["a", "b"],
-        "additionalProperties": False,
-    }
-
-    async def execute(self, a: int | float, b: int | float) -> ToolResult:
-        """执行加法并返回文本结果。
-
-        Args:
-            a: 第一个数字，由 ToolRegistry 校验为 number。
-            b: 第二个数字，由 ToolRegistry 校验为 number。
-
-        Returns:
-            包含 ``str(a + b)`` 的 ToolResult。例如 a=2、b=3 时 content="5"。
-
-        上下游:
-            AgentRunner 通过 ToolRegistry.execute 调用；结果作为
-            tool_call_id 对应的 role=tool 消息进入 messages。方法内部
-            ``await`` 并非必须，但保持异步接口统一，便于未来接入 I/O 工具。
-        """
-        return ToolResult(content=str(a + b))
-
-
 class ToolRegistry:
     """工具注册、Schema 导出、参数校验与执行入口。
 
-    V0 仅支持顺序执行；不实现 MCP、权限控制、并发执行或远程工具。
+    当前逐个执行工具；不实现 MCP、权限控制、并发执行或远程工具。
     """
 
     def __init__(
@@ -70,7 +37,7 @@ class ToolRegistry:
             None。
 
         上下游:
-            main.py 在启动时注册 AddTool；AgentRunner 通过 get_definitions
+            CLI 在启动时注册 AddTool；AgentRunner 通过 get_definitions
             和 execute 使用注册表。重复 name 会覆盖旧工具
         """
         if not isinstance(tool.name, str) or not tool.name:

@@ -8,6 +8,7 @@ import httpx
 import pytest
 
 import mini_harness.cli.app as cli_app
+import mini_harness.cli.settings as settings_module
 from mini_harness.cli import InteractiveCLI, ProfileStore, ProviderProfile
 from mini_harness.providers import ProviderConfig
 from tests.test_cli import ScriptedConsole
@@ -27,7 +28,7 @@ async def test_new_profile_saves_selected_reasoning_effort(tmp_path: Path, monke
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-env-key")
     console = ScriptedConsole(["2", "", "", "high", "y", "new"])
     store = ProfileStore(tmp_path / "config.json")
-    cli = InteractiveCLI(console=console, profile_store=store)
+    cli = InteractiveCLI(workspace=tmp_path, data_root=tmp_path / "data", console=console, profile_store=store)
     selection = await cli._create_config()
     assert selection.profile_name == "new"
     assert selection.config.reasoning_effort == "high" and selection.config.thinking
@@ -37,11 +38,11 @@ async def test_new_profile_saves_selected_reasoning_effort(tmp_path: Path, monke
     assert restored.config.reasoning_effort == "high"
 
 
-@pytest.mark.parametrize("workspace_enabled", [False, True])
+@pytest.mark.parametrize("workspace_source", ["explicit", "cwd"])
 @pytest.mark.parametrize("choice,expected", [("low", "low"), ("0", ""), ("q", "max")])
 @pytest.mark.asyncio
 async def test_settings_rebuilds_provider_and_preserves_chat(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workspace_enabled: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workspace_source: str,
     choice: str, expected: str,
 ) -> None:
     store = ProfileStore(tmp_path / "config.json")
@@ -66,12 +67,14 @@ async def test_settings_rebuilds_provider_and_preserves_chat(
         return provider
 
     monkeypatch.setattr(cli_app, "create_provider", create)
+    monkeypatch.setattr(settings_module, "create_provider", create)
     console = ScriptedConsole(["第一句", "/settings", choice, "第二句", "/exit"])
     workspace = tmp_path / "workspace"
     workspace.mkdir()
+    monkeypatch.chdir(workspace)
     cli = InteractiveCLI(console=console, profile_store=store,
-                         workspace=workspace if workspace_enabled else None,
-                         data_root=tmp_path / "data" if workspace_enabled else None)
+                         workspace=workspace if workspace_source == "explicit" else None,
+                         data_root=tmp_path / "data")
     await cli.run()
 
     assert len(requests) == 2  # 设置命令不请求 LLM。
@@ -103,7 +106,7 @@ async def test_save_failure_applies_settings_for_current_connection(tmp_path: Pa
     store = ProfileStore(tmp_path / "config.json")
     original = profile()
     store.upsert(original)
-    cli = InteractiveCLI(console=ScriptedConsole(["high"]), profile_store=store)
+    cli = InteractiveCLI(workspace=tmp_path, data_root=tmp_path / "data", console=ScriptedConsole(["high"]), profile_store=store)
     selection = await cli._config_from_profile(original)
 
     def fail(*args, **kwargs):
@@ -120,7 +123,7 @@ async def test_save_failure_applies_settings_for_current_connection(tmp_path: Pa
 @pytest.mark.asyncio
 async def test_menu_handles_invalid_choices_and_custom_effort(tmp_path: Path) -> None:
     console = ScriptedConsole(["medium", "bad", "c", "invalid value", "c", "custom-effort"])
-    cli = InteractiveCLI(console=console, profile_store=ProfileStore(tmp_path / "config.json"))
+    cli = InteractiveCLI(workspace=tmp_path, data_root=tmp_path / "data", console=console, profile_store=ProfileStore(tmp_path / "config.json"))
     effort = await cli._choose_reasoning_effort(profile().to_config())
     assert effort == "custom-effort"
     assert console.text.count("请选择有效序号或档位名称") == 3
@@ -128,14 +131,14 @@ async def test_menu_handles_invalid_choices_and_custom_effort(tmp_path: Path) ->
 
 @pytest.mark.asyncio
 async def test_enter_keeps_current_effort(tmp_path: Path) -> None:
-    cli = InteractiveCLI(console=ScriptedConsole([""]), profile_store=ProfileStore(tmp_path / "config.json"))
+    cli = InteractiveCLI(workspace=tmp_path, data_root=tmp_path / "data", console=ScriptedConsole([""]), profile_store=ProfileStore(tmp_path / "config.json"))
     assert await cli._choose_reasoning_effort(profile().to_config()) == "max"
 
 
 @pytest.mark.asyncio
 async def test_unsaved_config_settings_remain_in_memory(tmp_path: Path) -> None:
-    cli = InteractiveCLI(console=ScriptedConsole(["max"]), profile_store=ProfileStore(tmp_path / "config.json"))
-    selection = cli_app.Selection(ProviderConfig(provider="custom", model="deepseek-v4.1-flash-1017", base_url="https://example.com/v1"), cli_app.get_preset("custom"))
+    cli = InteractiveCLI(workspace=tmp_path, data_root=tmp_path / "data", console=ScriptedConsole(["max"]), profile_store=ProfileStore(tmp_path / "config.json"))
+    selection = settings_module.Selection(ProviderConfig(provider="custom", model="deepseek-v4.1-flash-1017", base_url="https://example.com/v1"), settings_module.get_preset("custom"))
     _, updated = await cli._edit_reasoning_settings(selection)
     assert updated.config.reasoning_effort == "max"
     assert not cli.store.path.exists()

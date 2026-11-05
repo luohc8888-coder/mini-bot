@@ -10,7 +10,8 @@ from typing import Any
 import pytest
 
 import mini_harness.session.manager as manager_module
-from mini_harness.agent import AgentLoop, AgentRunner, build_system_prompt
+from mini_harness.agent import AgentLoop, AgentRunner
+from mini_harness.prompts import build_default_system_prompt
 from mini_harness.bus import InboundMessage, MessageBus
 from mini_harness.cli import Console, InteractiveCLI, ProfileStore, ProviderProfile
 from mini_harness.providers import LLMResponse, MockProvider, ToolCallRequest
@@ -258,7 +259,7 @@ async def test_second_turn_provider_receives_full_first_turn_history_after_resta
     # 关键断言：第二轮模型实际收到的输入 = System Prompt + 第一轮完整历史
     # + 当前用户消息；System Prompt 不进入 Session 历史。
     expected = [
-        {"role": "system", "content": build_system_prompt(workspace)},
+        {"role": "system", "content": build_default_system_prompt(workspace)},
         *first_history,
         {"role": "user", "content": second_user_text},
     ]
@@ -313,7 +314,8 @@ async def test_save_failure_reports_error_and_keeps_old_file(
     manager = SessionManager(make_workspace(tmp_path), data_root=tmp_path / "data")
     old_text = json.dumps(
         {
-            "schema_version": 1,
+            "schema_version": 2,
+            "summary": "", "summary_boundary": 0, "summary_checkpoint_id": "",
             "workspace": str(manager.workspace),
             "session_key": "cli:main",
             "messages": [{"role": "user", "content": "旧历史"}],

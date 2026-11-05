@@ -17,15 +17,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
 
-from mini_harness.workspace import (
-    Workspace,
-    WorkspaceResolver,
-    workspace_id,
-)
+from mini_harness.workspace import Workspace, WorkspaceResolver, workspace_id
 
 
 DEFAULT_SESSION_KEY = "cli:main"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class SessionError(RuntimeError):
@@ -123,21 +119,6 @@ class SessionManager:
             / "session.json"
         )
 
-    @property
-    def workspace_path(self) -> Path:
-        """当前 Session 绑定的规范化 Workspace 路径。"""
-        return self.workspace
-
-    @property
-    def session_path(self) -> Path:
-        """Session JSON 文件路径（``path`` 的别名）。"""
-        return self.path
-
-    @property
-    def session_file(self) -> Path:
-        """Session JSON 文件路径的兼容别名。"""
-        return self.path
-
     def load(self, session_key: str | None = None) -> Session:
         """读取 Session；文件不存在时返回空 Session。
 
@@ -170,15 +151,23 @@ class SessionManager:
             raise SessionCorruptError(
                 f"Session 文件不是合法 JSON，保留原文件不覆盖：{self.path}"
             ) from exc
+        return self.decode_payload(payload, session_key=key)
+
+    def decode_payload(self, payload: object, *, session_key: str | None = None) -> Session:
+        """校验当前 schema 的 payload；显式迁移也复用同一套数据校验。"""
+        key = self.session_key if session_key is None else session_key
         if not isinstance(payload, dict):
             raise SessionCorruptError(
                 f"Session 文件格式错误（顶层必须是对象）：{self.path}"
             )
 
-        if payload.get("schema_version") != SCHEMA_VERSION:
+        version = payload.get("schema_version")
+        if type(version) is not int or version != SCHEMA_VERSION:
             raise SessionStorageError(
                 f"不支持的 Session schema_version："
-                f"{payload.get('schema_version')!r}（支持 {SCHEMA_VERSION}）"
+                f"{payload.get('schema_version')!r}（支持 {SCHEMA_VERSION}）；"
+                "旧文件请显式运行 mini-bot --migrate-session --workspace "
+                f"{str(self.workspace)!r}"
             )
 
         stored_workspace = payload.get("workspace")
@@ -210,11 +199,15 @@ class SessionManager:
                 f"Session 的 messages 必须是列表：{self.path}"
             )
         self._validate_messages(messages)
-        # 旧 schema v1 文件没有 Summary Checkpoint 字段，缺省按空摘要加载，
-        # schema_version 保持 1 以保证向后兼容。
-        summary = payload.get("summary", "")
-        summary_boundary = payload.get("summary_boundary", 0)
-        summary_checkpoint_id = payload.get("summary_checkpoint_id", "")
+        required = {"summary", "summary_boundary", "summary_checkpoint_id"}
+        missing = required - payload.keys()
+        if missing:
+            raise SessionCorruptError(
+                f"Session 缺少字段：{', '.join(sorted(missing))}"
+            )
+        summary = payload["summary"]
+        summary_boundary = payload["summary_boundary"]
+        summary_checkpoint_id = payload["summary_checkpoint_id"]
         self._validate_summary(
             summary=summary,
             summary_boundary=summary_boundary,

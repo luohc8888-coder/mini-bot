@@ -11,13 +11,7 @@ import asyncio
 from collections.abc import Callable, Sequence
 from copy import deepcopy
 
-from .base import (
-    LLMProvider,
-    LLMResponse,
-    Message,
-    TextDeltaCallback,
-    ToolDefinition,
-)
+from .base import LLMProvider, LLMResponse, Message, TextDeltaCallback, ToolDefinition
 
 # 响应序列中的一步既可以是固定 LLMResponse，也可以是一个根据当前 messages
 # 动态构造响应的工厂函数。后者用于让第二次响应真正读取工具结果。
@@ -52,7 +46,7 @@ class MockProvider(LLMProvider):
             None。
 
         上下游:
-            main.py 和测试构造该对象，然后注入 AgentRunner。Runner 不知道
+            CLI 与测试构造该对象，然后注入 AgentRunner。Runner 不知道
             响应是固定值还是工厂函数，只依赖 LLMProvider 接口。
         """
         self._responses = list(responses)

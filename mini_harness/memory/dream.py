@@ -17,33 +17,21 @@ add/update/remove 操作更新 ``MEMORY.md``。
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import re
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Any
 
 from mini_harness.providers.base import LLMProvider
 
 from .store import HistoryRecord, MemoryStore
 
+if TYPE_CHECKING:
+    from mini_harness.agent.context_types import ContextConfig
+
+from .document import _MemoryDocument, _parse_operations, _apply_operations
+
 logger = logging.getLogger(__name__)
 
-
-# Dream 允许写入的固定 section；未知 section 一律归类为“其他”。这个顺序
-# 同时决定写回 MEMORY.md 时各 section 的排列顺序，保证输出稳定可预期。
-DREAM_SECTIONS: tuple[str, ...] = (
-    "用户偏好",
-    "项目决策",
-    "架构约定",
-    "长期目标",
-    "经验知识",
-    "其他",
-)
-
-# 单条记忆文本的硬上限。超过 2000 字符通常意味着模型把整段对话或工具
-# 输出抄了进来，必须拒绝而不是写入 MEMORY.md。
-MAX_ENTRY_CHARS = 2000
 
 # 已有 Dream 运行时，后续调用立即返回该错误，不排队也不调用 LLM。
 BUSY_ERROR = "Dream 正在运行"
@@ -123,288 +111,6 @@ class DreamResult:
     error: str | None = None
 
 
-# ---------------------------------------------------------------------------
-# MEMORY.md 文档模型与确定性操作
-# ---------------------------------------------------------------------------
-
-
-_SECTION_HEADING_RE = re.compile(r"^##\s+(.+?)\s*$")
-_BULLET_RE = re.compile(r"^[-*+](?:\s+|$)")
-_WHITESPACE_RE = re.compile(r"\s+")
-_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
-
-
-def _normalize_text(value: str) -> str:
-    """规范化单条记忆：去首尾空白、去 bullet 前缀、压缩连续空白。"""
-    text = value.strip()
-    text = _BULLET_RE.sub("", text)
-    text = _WHITESPACE_RE.sub(" ", text)
-    return text.strip()
-
-
-def _bullet_text(line: str) -> str | None:
-    """若 ``line`` 是 bullet 行则返回去掉前缀的正文，否则返回 None。"""
-    match = _BULLET_RE.match(line)
-    if match is None:
-        return None
-    return line[match.end() :].strip()
-
-
-def _validate_entry_text(value: object) -> str | None:
-    """校验 LLM 给出的单条文本，合法时返回规范化文本。
-
-    以下情况视为非法条目（调用方计入 ``skipped``）：
-    - 不是字符串或规范化后为空；
-    - 超过 ``MAX_ENTRY_CHARS`` 字符；
-    - 含换行、制表符等控制字符（防止把多行内容或日志塞进单条记忆）。
-    """
-    if not isinstance(value, str):
-        return None
-    if _CONTROL_CHARS_RE.search(value):
-        return None
-    normalized = _normalize_text(value)
-    if not normalized:
-        return None
-    if len(normalized) > MAX_ENTRY_CHARS:
-        return None
-    return normalized
-
-
-@dataclass(slots=True)
-class _MemorySection:
-    """MEMORY.md 中的一个二级标题 section。"""
-
-    title: str
-    entries: list[str] = field(default_factory=list)
-    extra_lines: list[str] = field(default_factory=list)
-
-
-class _MemoryDocument:
-    """MEMORY.md 的可编辑模型。
-
-    只解析本模块约定格式（``## section`` + ``- 条目``）；标题前的普通文本
-    作为 preamble 原样保留，标题下的非 bullet 行作为 extra_lines 保留，
-    避免 Dream 误删用户手写的说明文字。
-    """
-
-    def __init__(
-        self,
-        *,
-        preamble: list[str] | None = None,
-        sections: list[_MemorySection] | None = None,
-    ) -> None:
-        self.preamble = list(preamble or [])
-        self.sections = list(sections or [])
-
-    # -- 解析与渲染 -----------------------------------------------------
-
-    @classmethod
-    def parse(cls, content: str) -> "_MemoryDocument":
-        """把 MEMORY.md 文本解析成文档模型。"""
-        preamble: list[str] = []
-        pending_preamble: list[str] = []
-        sections: list[_MemorySection] = []
-        current: _MemorySection | None = None
-
-        for raw_line in content.splitlines():
-            line = raw_line.rstrip()
-            heading = _SECTION_HEADING_RE.match(line)
-            if heading is not None:
-                current = _MemorySection(title=heading.group(1).strip())
-                sections.append(current)
-                continue
-            if current is None:
-                pending_preamble.append(line)
-                continue
-            _append_section_line(current, line)
-
-        # 标题前的 bullet 归入“其他”section，避免手写 MEMORY.md 丢失条目；
-        # 其余行保留为 preamble（例如 "# 长期记忆" 标题或说明文字）。
-        preamble_bullets: list[str] = []
-        for line in pending_preamble:
-            bullet = _bullet_text(line.strip())
-            if bullet is None:
-                preamble.append(line)
-            elif bullet:
-                preamble_bullets.append(bullet)
-        if preamble_bullets:
-            other = next(
-                (section for section in sections if section.title == "其他"),
-                None,
-            )
-            if other is None:
-                other = _MemorySection(title="其他")
-                sections.append(other)
-            other.entries = preamble_bullets + other.entries
-
-        return cls(preamble=preamble, sections=sections)
-
-    def render(self) -> str:
-        """把文档模型渲染成稳定的 MEMORY.md 文本。"""
-        lines: list[str] = []
-
-        preamble = list(self.preamble)
-        while preamble and not preamble[0].strip():
-            preamble.pop(0)
-        while preamble and not preamble[-1].strip():
-            preamble.pop()
-        if preamble:
-            lines.extend(preamble)
-        elif self._has_entries():
-            # 新建/空文件首次写入时补一个总标题，保持 MEMORY.md 可读。
-            lines.append("# 长期记忆")
-
-        ordered_sections = self._ordered_sections()
-        for section in ordered_sections:
-            entries = [
-                normalized
-                for normalized in (
-                    _normalize_text(entry) for entry in section.entries
-                )
-                if normalized
-            ]
-            if not entries and not section.extra_lines:
-                continue
-            if lines:
-                lines.append("")
-            lines.append(f"## {section.title}")
-            for entry in entries:
-                lines.append(f"- {entry}")
-            lines.extend(section.extra_lines)
-
-        while lines and not lines[-1].strip():
-            lines.pop()
-        if not lines:
-            return ""
-        return "\n".join(lines) + "\n"
-
-    # -- 查询与修改 -----------------------------------------------------
-
-    def _has_entries(self) -> bool:
-        return any(
-            _normalize_text(entry)
-            for section in self.sections
-            for entry in section.entries
-        )
-
-    def _ordered_sections(self) -> list[_MemorySection]:
-        """按固定 section 顺序输出；未知标题保持原有相对顺序追加在后。"""
-        ordered: list[_MemorySection] = []
-        used: set[int] = set()
-        for title in DREAM_SECTIONS:
-            for section in self.sections:
-                if id(section) in used:
-                    continue
-                if section.title == title:
-                    ordered.append(section)
-                    used.add(id(section))
-                    break
-        for section in self.sections:
-            if id(section) not in used:
-                ordered.append(section)
-                used.add(id(section))
-        return ordered
-
-    def _ensure_section(self, title: str) -> _MemorySection:
-        for section in self.sections:
-            if section.title == title:
-                return section
-        section = _MemorySection(title=title)
-        self.sections.append(section)
-        return section
-
-    def find(self, normalized: str) -> tuple[_MemorySection, int] | None:
-        """查找规范化后等于 ``normalized`` 的第一条记忆。"""
-        if not normalized:
-            return None
-        for section in self.sections:
-            for index, entry in enumerate(section.entries):
-                if _normalize_text(entry) == normalized:
-                    return section, index
-        return None
-
-    def add(self, section_title: str, text: str) -> None:
-        self._ensure_section(section_title).entries.append(text)
-
-    def replace(
-        self, location: tuple[_MemorySection, int], new_text: str
-    ) -> None:
-        section, index = location
-        section.entries[index] = new_text
-
-    def remove(self, location: tuple[_MemorySection, int]) -> None:
-        section, index = location
-        del section.entries[index]
-
-
-def _append_section_line(section: _MemorySection, line: str) -> None:
-    """把 section 下的一行文本归类为 bullet 条目或原样保留行。"""
-    stripped = line.strip()
-    if not stripped:
-        return
-    bullet = _bullet_text(stripped)
-    if bullet is not None:
-        if bullet:
-            section.entries.append(bullet)
-    else:
-        section.extra_lines.append(line)
-
-
-# ---------------------------------------------------------------------------
-# JSON 解析
-# ---------------------------------------------------------------------------
-
-
-def _strip_json_fence(text: str) -> str:
-    """去掉可选的 Markdown ```json ... ``` 围栏。"""
-    stripped = text.strip()
-    if not stripped.startswith("```"):
-        return stripped
-    lines = stripped.splitlines()
-    if len(lines) < 2 or not lines[-1].strip().startswith("```"):
-        return stripped
-    return "\n".join(lines[1:-1]).strip()
-
-
-def _empty_operations() -> dict[str, list[Any]]:
-    return {"add": [], "update": [], "remove": []}
-
-
-def _parse_operations(content: str) -> dict[str, list[Any]]:
-    """解析 LLM 返回的 JSON 操作。
-
-    Raises:
-        ValueError: JSON 非法或顶层结构不符合契约。
-    """
-    text = _strip_json_fence(content)
-    normalized = text.strip().strip("。.!！").strip().replace("（", "(").replace("）", ")")
-    if normalized.lower() in {"(nothing)", "nothing", "none", "无"}:
-        return _empty_operations()
-
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Dream 返回非法 JSON：{exc}") from exc
-
-    if not isinstance(payload, dict):
-        raise ValueError("Dream 返回结构非法：顶层必须是 JSON 对象")
-
-    operations = _empty_operations()
-    for key in ("add", "update", "remove"):
-        value = payload.get(key, [])
-        if value is None:
-            value = []
-        if not isinstance(value, list):
-            raise ValueError(f"Dream 返回结构非法：{key} 必须是数组")
-        operations[key] = value
-    return operations
-
-
-# ---------------------------------------------------------------------------
-# DreamManager
-# ---------------------------------------------------------------------------
-
-
 class DreamManager:
     """长期记忆整理引擎。
 
@@ -413,6 +119,7 @@ class DreamManager:
             ``self.provider``。
         store: MemoryStore，负责 history / MEMORY.md / cursor 的文件 I/O。
         config: DreamConfig；None 时使用默认配置。
+        context_config: 请求预算；None 按 Provider 能力推导，未知能力使用默认预算。
 
     上下游:
         SessionCompactor 通过 ``MemoryStore.append_history`` 写入归档；
@@ -425,10 +132,13 @@ class DreamManager:
         provider: LLMProvider,
         store: MemoryStore,
         config: DreamConfig | None = None,
+        *,
+        context_config: ContextConfig | None = None,
     ) -> None:
         self.provider = provider
         self.store = store
         self.config = config if config is not None else DreamConfig()
+        self.context_config = context_config
         # 实例级互斥：/dream 手动触发与后台定时任务共用同一把锁。
         self._lock = asyncio.Lock()
 
@@ -469,21 +179,15 @@ class DreamManager:
                 cursor=current_cursor,
                 error=f"读取归档历史失败：{exc}",
             )
+        read_cursor = current_cursor
         if current_cursor > latest_cursor:
             logger.warning(
                 "Dream cursor %s 超过 history 最新 cursor %s，回退到 0 重放",
                 current_cursor,
                 latest_cursor,
             )
-            try:
-                self.store.set_dream_cursor(0)
-            except Exception as exc:  # noqa: BLE001
-                return DreamResult(
-                    processed_entries=0,
-                    cursor=current_cursor,
-                    error=f"修正 Dream cursor 失败：{exc}",
-                )
-            current_cursor = 0
+            # 只调整本次读取起点；成功处理前不改持久化 cursor。
+            read_cursor = 0
         effective_max = (
             self.config.max_entries if max_entries is None else max_entries
         )
@@ -492,7 +196,7 @@ class DreamManager:
 
         try:
             batch = self.store.read_history(
-                since_cursor=current_cursor, limit=effective_max
+                since_cursor=read_cursor, limit=effective_max
             )
         except Exception as exc:  # noqa: BLE001 - 统一转换为 DreamResult 错误
             return DreamResult(
@@ -516,49 +220,64 @@ class DreamManager:
                 error=f"读取 MEMORY.md 失败：{exc}",
             )
 
-        messages = [
-            {"role": "system", "content": DREAM_SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": self._build_user_message(current_memory, batch),
-            },
-        ]
         try:
-            response = await self.provider.chat(messages=messages, tools=None)
-        except Exception as exc:  # noqa: BLE001 - Provider 失败不能让进程崩溃
-            logger.warning("Dream Provider 调用失败：%s", exc)
-            return DreamResult(
-                processed_entries=len(batch),
-                cursor=current_cursor,
-                llm_called=True,
-                error=f"Dream Provider 调用失败：{exc}",
-            )
-
-        # Provider 契约返回 LLMResponse；这里用 getattr 兼容测试替身，
-        # 同时把“非字符串/空字符串”统一视为空响应失败。
-        content = getattr(response, "content", None)
-        if isinstance(response, str):
-            content = response
-        if not isinstance(content, str) or not content.strip():
-            return DreamResult(
-                processed_entries=len(batch),
-                cursor=current_cursor,
-                llm_called=True,
-                error="Dream Provider 返回空响应",
-            )
-
-        try:
-            operations = _parse_operations(content)
+            # 切换模型只影响下一次 Dream，不改变正在执行的请求及其预算。
+            provider = self.provider
+            input_budget, output_reserve = self._request_limits(provider)
+            batch, requests = self._build_requests(current_memory, batch, input_budget)
         except ValueError as exc:
             return DreamResult(
-                processed_entries=len(batch),
                 cursor=current_cursor,
-                llm_called=True,
                 error=str(exc),
             )
 
         document = _MemoryDocument.parse(current_memory)
-        added, updated, removed, skipped = _apply_operations(document, operations)
+        added = updated = removed = skipped = 0
+        from mini_harness.agent.tokens import estimate_messages_tokens
+
+        # 超大单条归档逐片处理，不丢弃中间内容。所有片段成功后才写记忆并
+        # 推进该条 cursor，任一片失败都保留旧文件，重试可完整重放。
+        for messages in requests:
+            output_budget = min(
+                provider.max_output_tokens,
+                input_budget + output_reserve - estimate_messages_tokens(messages),
+            )
+            try:
+                with provider.request_output_budget(output_budget):
+                    response = await provider.chat(messages=messages, tools=None)
+            except Exception as exc:  # noqa: BLE001 - Provider 失败安全回退
+                logger.warning("Dream Provider 调用失败：%s", exc)
+                return DreamResult(
+                    processed_entries=len(batch),
+                    cursor=current_cursor,
+                    llm_called=True,
+                    error=f"Dream Provider 调用失败：{exc}",
+                )
+
+            content = (
+                response if isinstance(response, str)
+                else getattr(response, "content", None)
+            )
+            try:
+                if getattr(response, "finish_reason", "stop") in {
+                    "length", "max_tokens",
+                }:
+                    raise ValueError("Dream 模型输出因长度上限截断，已放弃本次操作")
+                if not isinstance(content, str) or not content.strip():
+                    raise ValueError("Dream Provider 返回空响应")
+                operations = _parse_operations(content)
+            except ValueError as exc:
+                return DreamResult(
+                    processed_entries=len(batch),
+                    cursor=current_cursor,
+                    llm_called=True,
+                    error=str(exc),
+                )
+            counts = _apply_operations(document, operations)
+            added += counts[0]
+            updated += counts[1]
+            removed += counts[2]
+            skipped += counts[3]
 
         # 没有任何有效修改时不重写文件，直接推进 cursor（例如 LLM 输出
         # (nothing) 或全部操作都是重复/无效条目）。
@@ -621,6 +340,79 @@ class DreamManager:
             llm_called=True,
         )
 
+    def _request_limits(self, provider: LLMProvider | None = None) -> tuple[int, int]:
+        """维护请求也遵守模型窗口、CLI 预算与输出预留。"""
+        from mini_harness.agent.context_types import ContextConfig
+
+        provider = self.provider if provider is None else provider
+        config = self.context_config or ContextConfig.from_provider(provider)
+        window = config.max_context_tokens
+        provider_window = getattr(provider, "context_window_tokens", 0)
+        if provider_window > 0:
+            window = min(window, provider_window)
+        reserve = max(1, config.reserve_output_tokens)
+        budget = window - reserve - config.safety_margin_tokens
+        if budget <= 0:
+            raise ValueError("Dream 输入预算不足，请提高上下文窗口或降低输出预留")
+        return budget, reserve
+
+    def _build_requests(
+        self,
+        current_memory: str,
+        batch: list[HistoryRecord],
+        budget: int,
+    ) -> tuple[list[HistoryRecord], list[list[dict[str, Any]]]]:
+        """按完整归档选取连续前缀；超大首条分片，覆盖全部正文。"""
+        from mini_harness.agent.tokens import estimate_messages_tokens, truncate_text_to_token_budget
+
+        def messages(memory: str, records: list[HistoryRecord]) -> list[dict[str, Any]]:
+            return [
+                {"role": "system", "content": DREAM_SYSTEM_PROMPT},
+                {"role": "user", "content": self._build_user_message(memory, records)},
+            ]
+
+        payload_budget = budget - estimate_messages_tokens(messages("", []))
+        if payload_budget <= 0:
+            raise ValueError("Dream 输入预算不足以容纳系统提示，未调用 LLM")
+        # 记忆只裁剪发送副本；操作始终在完整文档上校验/去重，不删除未展示内容。
+        preview = truncate_text_to_token_budget(
+            current_memory, payload_budget // 3,
+            marker="\n[记忆仅展示部分，完整文件仍保留]\n",
+        )
+        selected: list[HistoryRecord] = []
+        for record in batch:
+            candidate = messages(preview, [*selected, record])
+            if estimate_messages_tokens(candidate) > budget:
+                break
+            selected.append(record)
+        if selected:
+            return selected, [messages(preview, selected)]
+
+        # 首条自身过大时不能截断后推进整条 cursor，否则中间事实永久丢失。
+        # 按字符二分出能放下的最大前缀；各片顺序输入同一内存文档，统一提交。
+        record = batch[0]
+        content = record.content
+        offset = 0
+        requests: list[list[dict[str, Any]]] = []
+        while offset < len(content):
+            prefix = f"[归档 {record.cursor} 的连续片段 {len(requests) + 1}]\n"
+            low, high = 0, len(content) - offset
+            while low < high:
+                size = (low + high + 1) // 2
+                fragment = replace(record, content=prefix + content[offset:offset + size])
+                if estimate_messages_tokens(messages(preview, [fragment])) <= budget:
+                    low = size
+                else:
+                    high = size - 1
+            if low == 0:
+                raise ValueError("Dream 输入预算不足以容纳归档元数据，未调用 LLM")
+            fragment = replace(record, content=prefix + content[offset:offset + low])
+            requests.append(messages(preview, [fragment]))
+            offset += low
+        if not requests:
+            raise ValueError("Dream 输入预算不足以容纳归档，未调用 LLM")
+        return [record], requests
+
     @staticmethod
     def _build_user_message(
         current_memory: str, batch: list[HistoryRecord]
@@ -644,175 +436,4 @@ class DreamManager:
         )
 
 
-def _apply_operations(
-    document: _MemoryDocument, operations: dict[str, list[Any]]
-) -> tuple[int, int, int, int]:
-    """把 LLM 返回的操作确定性应用到文档模型。
-
-    Returns:
-        ``(added, updated, removed, skipped)``。
-    """
-    added = updated = removed = skipped = 0
-
-    for item in operations.get("add", []):
-        if not isinstance(item, dict):
-            skipped += 1
-            continue
-        text = _validate_entry_text(item.get("text"))
-        if text is None:
-            skipped += 1
-            continue
-        section = item.get("section")
-        section_title = (
-            section if isinstance(section, str) and section in DREAM_SECTIONS
-            else "其他"
-        )
-        if document.find(text) is not None:
-            # 规范化后与已有条目重复：跳过，保证 MEMORY.md 不重复。
-            skipped += 1
-            continue
-        document.add(section_title, text)
-        added += 1
-
-    for item in operations.get("update", []):
-        if not isinstance(item, dict):
-            skipped += 1
-            continue
-        old = _validate_entry_text(item.get("old"))
-        new = _validate_entry_text(item.get("new"))
-        if old is None or new is None:
-            skipped += 1
-            continue
-        location = document.find(old)
-        if location is None:
-            skipped += 1
-            continue
-        if old == new:
-            # 内容没有变化，不算一次有效更新。
-            skipped += 1
-            continue
-        existing = document.find(new)
-        if existing is not None and existing != location:
-            # 新文本已存在于其他位置：合并为一条，删除旧条目。
-            document.remove(location)
-        else:
-            document.replace(location, new)
-        updated += 1
-
-    for item in operations.get("remove", []):
-        old = _validate_entry_text(item)
-        if old is None:
-            skipped += 1
-            continue
-        location = document.find(old)
-        if location is None:
-            skipped += 1
-            continue
-        document.remove(location)
-        removed += 1
-
-    return added, updated, removed, skipped
-
-
-# ---------------------------------------------------------------------------
-# DreamScheduler
-# ---------------------------------------------------------------------------
-
-
-class DreamScheduler:
-    """后台定时 Dream 调度器。
-
-    Args:
-        dream: DreamManager 实例。
-        interval_hours: 两次 Dream 之间的间隔小时数。
-        run_on_start: 启动时是否立即执行一次 Dream。
-
-    上下游:
-        CLI 在 Session 模式下调用 :meth:`start` 创建后台任务，退出时调用
-        :meth:`stop` 取消。``DreamConfig.enabled=False`` 时不启动。
-    """
-
-    def __init__(
-        self,
-        dream: DreamManager,
-        *,
-        interval_hours: float = 2.0,
-        run_on_start: bool = True,
-    ) -> None:
-        self.dream = dream
-        self.interval_hours = interval_hours
-        self.run_on_start = run_on_start
-        self._task: asyncio.Task[None] | None = None
-        self._stop_event = asyncio.Event()
-
-    def _enabled(self) -> bool:
-        return bool(getattr(self.dream.config, "enabled", True))
-
-    async def run_once(self) -> DreamResult | None:
-        """执行一次 Dream；禁用时返回 None。"""
-        if not self._enabled():
-            return None
-        return await self.dream.run()
-
-    async def run(self) -> None:
-        """调度循环：首次立即检查（可选），之后每 interval 执行一次。"""
-        if not self._enabled():
-            return
-
-        if self.run_on_start:
-            await self._safe_run_once()
-
-        interval_seconds = float(self.interval_hours) * 3600.0
-        if interval_seconds <= 0:
-            return
-
-        while not self._stop_event.is_set():
-            try:
-                await asyncio.wait_for(
-                    self._stop_event.wait(), timeout=interval_seconds
-                )
-            except asyncio.TimeoutError:
-                await self._safe_run_once()
-
-    async def _safe_run_once(self) -> None:
-        """执行一次 Dream；意外异常只记录日志，不终止调度循环。"""
-        try:
-            await self.run_once()
-        except Exception:  # noqa: BLE001 - 后台任务必须保持存活
-            logger.exception("Dream 定时任务执行异常")
-
-    def start(self) -> asyncio.Task[None] | None:
-        """启动后台任务；已运行则返回现有 task，禁用时返回 None。"""
-        if not self._enabled():
-            return None
-        if self._task is not None and not self._task.done():
-            return self._task
-        self._stop_event = asyncio.Event()
-        self._task = asyncio.create_task(self.run(), name="dream-scheduler")
-        return self._task
-
-    async def stop(self) -> None:
-        """停止后台任务并等待其退出。"""
-        self._stop_event.set()
-        task = self._task
-        self._task = None
-        if task is None:
-            return
-        if not task.done():
-            task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-
-
-__all__ = [
-    "BUSY_ERROR",
-    "DREAM_SECTIONS",
-    "DREAM_SYSTEM_PROMPT",
-    "DreamConfig",
-    "DreamManager",
-    "DreamResult",
-    "DreamScheduler",
-    "MAX_ENTRY_CHARS",
-]
+__all__ = ["DreamConfig", "DreamManager", "DreamResult", "DREAM_SYSTEM_PROMPT", "BUSY_ERROR"]

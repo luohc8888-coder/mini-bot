@@ -349,9 +349,9 @@ def test_file_tools_expose_nanobot_style_schemas(tmp_path: Path) -> None:
 
 
 def test_cli_registers_file_tools_when_workspace_is_available(tmp_path: Path) -> None:
-    """V1 CLI 在有 Workspace 时注册文件工具，V0 兼容模式不注册。"""
+    """正式 CLI 始终绑定 Workspace 并注册完整文件工具。"""
     store = ProfileStore(tmp_path / "profiles.json")
-    cli = InteractiveCLI(profile_store=store, workspace=tmp_path)
+    cli = InteractiveCLI(data_root=tmp_path / "data", profile_store=store, workspace=tmp_path)
     assert "find_files" in cli.tools
     assert "grep" in cli.tools
     assert "list_dir" in cli.tools
@@ -361,17 +361,6 @@ def test_cli_registers_file_tools_when_workspace_is_available(tmp_path: Path) ->
     assert "apply_patch" in cli.tools
     assert "run_command" in cli.tools
     assert "file_info" in cli.tools
-
-    v0_cli = InteractiveCLI(profile_store=store)
-    assert "find_files" not in v0_cli.tools
-    assert "grep" not in v0_cli.tools
-    assert "list_dir" not in v0_cli.tools
-    assert "read_file" not in v0_cli.tools
-    assert "write_file" not in v0_cli.tools
-    assert "edit_file" not in v0_cli.tools
-    assert "apply_patch" not in v0_cli.tools
-    assert "run_command" not in v0_cli.tools
-    assert "file_info" not in v0_cli.tools
 
 
 @pytest.mark.asyncio

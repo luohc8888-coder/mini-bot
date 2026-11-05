@@ -3,25 +3,23 @@
 from .compaction import (
     CompactionOutcome,
     ContextCompactor,
-    ContextGovernor,
-    GovernedRequest,
     SUMMARY_SYSTEM_PROMPT,
     truncate_tool_results,
 )
-from .context import (
+from .governor import ContextGovernor, GovernedRequest
+from .context_types import (
     BuiltContext,
     ContextBudgetExceeded,
-    ContextBuilder,
     ContextConfig,
     ContextError,
     ContextStats,
     ProviderRequestSnapshot,
-    build_session_summary_message,
-    estimate_tokens,
 )
+from .context import ContextBuilder
+from .messages import build_session_summary_message
+from .tokens import estimate_tokens
 from .loop import AgentLoop
 from .maintenance import IdleCompactionScheduler
-from .prompt import build_system_prompt
 from .runner import AgentRunResult, AgentRunSpec, AgentRunner
 from .session_compaction import PersistentCompactionResult, SessionCompactor
 
@@ -46,7 +44,6 @@ __all__ = [
     "SUMMARY_SYSTEM_PROMPT",
     "SessionCompactor",
     "build_session_summary_message",
-    "build_system_prompt",
     "estimate_tokens",
     "truncate_tool_results",
 ]

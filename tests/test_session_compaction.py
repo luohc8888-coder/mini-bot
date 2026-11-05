@@ -23,7 +23,7 @@ from typing import Any
 import pytest
 
 from mini_harness.agent.compaction import SUMMARY_SYSTEM_PROMPT
-from mini_harness.agent.context import ContextConfig
+from mini_harness.agent.context_types import ContextConfig
 from mini_harness.agent.session_compaction import (
     PersistentCompactionResult,
     SessionCompactor,
@@ -700,3 +700,64 @@ def test_pending_archive_is_retried_without_llm(
     assert len(provider.calls) == calls_after_first
     assert compactor.has_unarchived_history(manager.load()) is False
     assert [record.content for record in store.read_history()] == [first.summary]
+
+
+def test_pending_archive_is_preserved_when_new_turn_arrives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """新回合不能让归档失败的旧 checkpoint 被新版 summary 覆盖。"""
+    manager = make_manager(tmp_path)
+    store = MemoryStore(manager.workspace)
+    save_messages(manager, make_complete_turn(1))
+    provider = RecordingSummaryProvider(["旧检查点。", "合并新回合后的检查点。"])
+    compactor = SessionCompactor(provider, manager, memory_store=store)
+    original_append = store.append_history
+
+    def failing_append(*args: Any, **kwargs: Any) -> int:
+        raise MemoryStoreError("disk full")
+
+    monkeypatch.setattr(store, "append_history", failing_append)
+    first = asyncio.run(compactor.compact())
+    session = manager.load()
+    session.messages.extend(make_complete_turn(2))
+    manager.save(session)
+    before = manager.path.read_bytes()
+
+    failed_retry = asyncio.run(compactor.compact())
+    assert failed_retry.status == "failed"
+    assert manager.path.read_bytes() == before
+    assert len(provider.calls) == 1
+
+    monkeypatch.setattr(store, "append_history", original_append)
+    second = asyncio.run(compactor.compact())
+    assert second.status == "compacted"
+    assert [record.checkpoint_id for record in store.read_history()] == [
+        first.checkpoint_id, second.checkpoint_id,
+    ]
+    assert len(provider.calls) == 2
+
+
+@pytest.mark.parametrize("with_tools", [False, True])
+def test_abandoned_turn_does_not_block_later_history(
+    tmp_path: Path, with_tools: bool,
+) -> None:
+    """历史失败轮次按未完成事实摘要；原消息与最新未完成轮次保持不变。"""
+    manager = make_manager(tmp_path)
+    abandoned = make_tool_turn(2)[:-1] if with_tools else [
+        {"role": "user", "content": "旧请求中断，没有最终结论。"},
+    ]
+    latest = make_tool_turn(4)[:-1]
+    archived = [*make_complete_turn(1), *abandoned, *make_complete_turn(3)]
+    messages = [*archived, *latest]
+    save_messages(manager, messages)
+    provider = RecordingSummaryProvider(["旧轮次中断，第三轮已回答。"])
+
+    result = asyncio.run(SessionCompactor(provider, manager).compact())
+
+    assert result.status == "compacted"
+    assert result.boundary == len(archived)
+    restored = manager.load()
+    assert restored.messages == messages
+    assert restored.messages[result.boundary:] == latest
+    assert "此历史轮次未产生最终回答" in provider.calls[0][1]["content"]
+    assert_tool_protocol(restored.messages)

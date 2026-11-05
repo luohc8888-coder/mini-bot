@@ -126,6 +126,8 @@ class IdleCompactionScheduler:
         session_key: str,
         fingerprint: tuple[float, int, str],
         now: float,
+        *,
+        retryable: bool = True,
     ) -> None:
         """记录失败并设置指数退避；避免后台每个周期重复调用 LLM。"""
         count = self._failure_counts.get(session_key, 0) + 1
@@ -133,7 +135,7 @@ class IdleCompactionScheduler:
         delay = min(base * (2 ** min(count - 1, 6)), 3600.0)
         self._failure_fingerprints[session_key] = fingerprint
         self._failure_counts[session_key] = count
-        self._retry_after[session_key] = now + delay
+        self._retry_after[session_key] = now + delay if retryable else float("inf")
 
     def _clear_failure(self, session_key: str) -> None:
         self._failure_fingerprints.pop(session_key, None)
@@ -263,11 +265,13 @@ class IdleCompactionScheduler:
             result = await self.compactor.compact(reason="idle")
         except Exception:  # noqa: BLE001 - 后台任务异常不能终止调度循环
             logger.exception("空闲压缩执行失败")
-            self._record_failure(session.key, fingerprint, now)
+            self._record_failure(session.key, fingerprint, self.clock())
             return None
 
         if result is not None and getattr(result, "status", "") == "failed":
-            self._record_failure(session.key, fingerprint, now)
+            self._record_failure(
+                session.key, fingerprint, self.clock(), retryable=result.retryable
+            )
         elif result is not None and getattr(result, "status", "") in {
             "compacted",
             "nothing_to_compact",

@@ -1,0 +1,117 @@
+[
+  {
+    "scenario": "real_long_session",
+    "group": "A0",
+    "turns": 40,
+    "peak_estimated_tokens": 7148,
+    "avg_estimated_tokens": 6162.1,
+    "context_errors": 0,
+    "normal_calls": 40,
+    "summary_calls": 0,
+    "actual_prompt_tokens": 155302,
+    "actual_completion_tokens": 12633,
+    "actual_total_tokens": 167935,
+    "chat_prompt_tokens": 155302,
+    "summary_prompt_tokens": 0,
+    "final_facts_present": 0,
+    "fact_total": 6,
+    "final_summary_boundary": 0,
+    "final_summary_tokens": 0,
+    "session_messages": 80,
+    "compaction_log": []
+  },
+  {
+    "scenario": "real_long_session",
+    "group": "B",
+    "turns": 40,
+    "peak_estimated_tokens": 7144,
+    "avg_estimated_tokens": 4875.6,
+    "context_errors": 0,
+    "normal_calls": 40,
+    "summary_calls": 9,
+    "actual_prompt_tokens": 159504,
+    "actual_completion_tokens": 25294,
+    "actual_total_tokens": 184798,
+    "chat_prompt_tokens": 136660,
+    "summary_prompt_tokens": 22844,
+    "final_facts_present": 6,
+    "fact_total": 6,
+    "final_summary_boundary": 66,
+    "final_summary_tokens": 1373,
+    "session_messages": 80,
+    "compaction_log": [
+      {
+        "turn": 5,
+        "status": "compacted",
+        "summarized_messages": 8,
+        "boundary": 8,
+        "summary_preview": "## 当前目标\n继续实现 Mini Bot 的上下文压缩与长期记忆。该对话中的重复背景用于模拟真实 Provider 评估场景下的长上下文压力。\n\n## 必须保留的关键事实\n- `FACT-AUTH=JWT`\n- `FACT-DB=PostgreSQL16`\n\n以上内容需在后续实现、摘要和记忆中保持原样，不得改写。\n\n## 工作目录\n`/private/var/folders/w6/3w8q48q96s53cwkgt_m7dwgh0000gn/T/mini-real-long-l7xsimk0/workspace`\n\n## 已完成动作\n- 多次对工作目录执行目录查看：\n  - `list_di",
+        "error": null
+      },
+      {
+        "turn": 9,
+        "status": "compacted",
+        "summarized_messages": 8,
+        "boundary": 16,
+        "summary_preview": "## 当前目标\n继续实现 Mini Bot 的上下文压缩与长期记忆。该对话是真实 Provider 评估用的长上下文压力背景，要求工程细节、设计约束、验证结论和待办事项在压缩、摘要和长期记忆中保持保真。\n\n## 必须原样保留的关键事实\n- `FACT-AUTH=JWT`\n- `FACT-DB=PostgreSQL16`\n- `FACT-PNPM=pnpm`（第6轮）\n- `FACT-PY=Python3.14`（第8轮）\n\n以上内容不得改写或丢失。第5轮、第7轮未引入新的关键事实。\n\n## 工作目录\n`/private/var/folders/w6/3w8q48q96s53cwkgt_m7dw",
+        "error": null
+      },
+      {
+        "turn": 13,
+        "status": "compacted",
+        "summarized_messages": 8,
+        "boundary": 24,
+        "summary_preview": "## 当前目标\n继续实现 Mini Bot 的上下文压缩（context compression）与长期记忆（long-term memory）。当前对话本身是用于真实 Provider 评估的长上下文压力背景，要求其中的工程细节、设计约束、验证结论和待办事项在压缩、摘要和长期记忆中保持保真。\n\n## 必须原样保留的关键事实\n- `FACT-AUTH=JWT`\n- `FACT-DB=PostgreSQL16`\n- `FACT-PNPM=pnpm`（第6轮）\n- `FACT-PY=Python3.14`（第8轮）\n- `FACT-P0=/opt/mini-bot/p0-1.py`（第10轮）\n-",
+        "error": null
+      },
+      {
+        "turn": 17,
+        "status": "compacted",
+        "summarized_messages": 8,
+        "boundary": 32,
+        "summary_preview": "# Mini Bot 上下文压缩与长期记忆——续作摘要\n\n## 当前目标\n继续实现 Mini Bot 的上下文压缩（context compression）与长期记忆（long-term memory）。本对话是真实 Provider 评估所用的长上下文压力背景，要求其中的工程细节、设计约束、验证结论和待办事项在压缩、摘要及长期记忆中保持保真。\n\n## 必须原样保留的关键事实\n- `FACT-AUTH=JWT`\n- `FACT-DB=PostgreSQL16`\n- `FACT-PNPM=pnpm`（第6轮）\n- `FACT-PY=Python3.14`（第8轮）\n- `FACT-P0=/opt",
+        "error": null
+      },
+      {
+        "turn": 21,
+        "status": "compacted",
+        "summarized_messages": 8,
+        "boundary": 40,
+        "summary_preview": "# Mini Bot 上下文压缩与长期记忆——续作摘要\n\n## 当前目标\n继续实现 Mini Bot 的上下文压缩（context compression）与长期记忆（long-term memory）。本对话是真实 Provider 评估所用的长上下文压力背景，要求其中的工程细节、设计约束、验证结论和待办事项在压缩、摘要及长期记忆中保持保真。\n\n## 必须原样保留的关键事实\n- `FACT-AUTH=JWT`\n- `FACT-DB=PostgreSQL16`\n- `FACT-PNPM=pnpm`（第6轮）\n- `FACT-PY=Python3.14`（第8轮）\n- `FACT-P0=/opt",
+        "error": null
+      },
+      {
+        "turn": 25,
+        "status": "compacted",
+        "summarized_messages": 8,
+        "boundary": 48,
+        "summary_preview": "# Mini Bot 上下文压缩与长期记忆——续作摘要（第24轮后）\n\n## 当前目标\n继续实现 Mini Bot 的上下文压缩（context compression）与长期记忆（long-term memory）。本对话是真实 Provider 评估所用的长上下文压力背景，要求工程细节、设计约束、验证结论和待办事项在压缩、摘要及长期记忆中保持保真。\n\n## 必须原样保留的关键事实\n- `FACT-AUTH=JWT`\n- `FACT-DB=PostgreSQL16`\n- `FACT-PNPM=pnpm`（第6轮）\n- `FACT-PY=Python3.14`（第8轮）\n- `FACT-P0=",
+        "error": null
+      },
+      {
+        "turn": 29,
+        "status": "compacted",
+        "summarized_messages": 8,
+        "boundary": 56,
+        "summary_preview": "# Mini Bot 上下文压缩与长期记忆——后续开发摘要（第28轮后）\n\n## 当前目标\n继续实现 Mini Bot 的上下文压缩（context compression）与长期记忆（long-term memory）。该对话是真实 Provider 评估使用的长上下文压力场景，要求：在设计约束、验证结论和待办事项经过压缩、摘要及长期记忆后，仍保持信息保真。\n\n## 必须原样保留的关键事实\n- `FACT-AUTH=JWT`\n- `FACT-DB=PostgreSQL16`\n- `FACT-PNPM=pnpm`\n- `FACT-PY=Python3.14`\n- `FACT-P0=/opt/m",
+        "error": null
+      },
+      {
+        "turn": 33,
+        "status": "compacted",
+        "summarized_messages": 6,
+        "boundary": 62,
+        "summary_preview": "# Mini Bot 上下文压缩与长期记忆——后续开发摘要（第31轮后）\n\n## 当前目标\n继续实现 Mini Bot 的上下文压缩（context compression）与长期记忆（long-term memory）。该对话是真实 Provider 评估使用的长上下文压力场景，要求：在设计约束、验证结论和待办事项经过压缩、摘要及长期记忆后，仍保持信息保真。\n\n## 必须原样保留的关键事实\n- `FACT-AUTH=JWT`\n- `FACT-DB=PostgreSQL16`\n- `FACT-PNPM=pnpm`\n- `FACT-PY=Python3.14`\n- `FACT-P0=/opt/m",
+        "error": null
+      },
+      {
+        "turn": 37,
+        "status": "compacted",
+        "summarized_messages": 4,
+        "boundary": 66,
+        "summary_preview": "# Mini Bot 上下文压缩与长期记忆——第33轮后交接摘要\n\n## 1. 当前目标\n继续实现 Mini Bot 的**上下文压缩（context compression）**与**长期记忆（long-term memory）**。该会话是真实 Provider 评估使用的长上下文压力场景，要求经过压缩、摘要和长期记忆后，工程设计约束、验证结论和待办事项仍保持信息保真。\n\n## 2. 必须逐字保留的关键事实（不得改写）\n- `FACT-AUTH=JWT`\n- `FACT-DB=PostgreSQL16`\n- `FACT-PNPM=pnpm`\n- `FACT-PY=Python3.14`\n-",
+        "error": null
+      }
+    ]
+  }
+]

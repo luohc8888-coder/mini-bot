@@ -99,7 +99,7 @@ async def test_interactive_cli_mock_chat(tmp_path: Path) -> None:
     console = ScriptedConsole(
         answers=["1", "", "计算 2 + 3", "/exit"],
     )
-    cli = InteractiveCLI(
+    cli = InteractiveCLI(workspace=tmp_path, data_root=tmp_path / "data",
         console=console,
         profile_store=ProfileStore(tmp_path / "config.json"),
     )
@@ -118,7 +118,7 @@ async def test_interactive_cli_mock_supports_multiple_turns(tmp_path: Path) -> N
     console = ScriptedConsole(
         answers=["1", "", "第一轮", "第二轮", "/exit"],
     )
-    cli = InteractiveCLI(
+    cli = InteractiveCLI(workspace=tmp_path, data_root=tmp_path / "data",
         console=console,
         profile_store=ProfileStore(tmp_path / "config.json"),
     )
@@ -143,7 +143,7 @@ async def test_interactive_cli_auto_uses_saved_profile(tmp_path: Path) -> None:
     console = ScriptedConsole(
         answers=["你好", "/exit"],
     )
-    cli = InteractiveCLI(console=console, profile_store=store)
+    cli = InteractiveCLI(workspace=tmp_path, data_root=tmp_path / "data", console=console, profile_store=store)
     await cli.run()
 
     assert "使用默认配置" in console.text
@@ -170,7 +170,7 @@ async def test_interactive_cli_saves_profile_without_api_key(
             "/exit",
         ],
     )
-    cli = InteractiveCLI(console=console, profile_store=store)
+    cli = InteractiveCLI(workspace=tmp_path, data_root=tmp_path / "data", console=console, profile_store=store)
     await cli.run()
 
     profiles = store.load()
@@ -197,7 +197,7 @@ def test_print_provider_catalog_includes_huawei_and_custom() -> None:
 async def test_choose_model_uses_preset_default_index(tmp_path: Path) -> None:
     """Huawei 的默认模型在候选列表第 4 项，Enter 应选中它。"""
     console = ScriptedConsole(answers=[""])
-    cli = InteractiveCLI(
+    cli = InteractiveCLI(workspace=tmp_path, data_root=tmp_path / "data",
         console=console,
         profile_store=ProfileStore(tmp_path / "config.json"),
     )
@@ -288,7 +288,7 @@ async def test_interactive_cli_default_profile_skips_api_key_prompt(
         set_default=True,
     )
     console = ScriptedConsole(answers=["/exit"])
-    cli = InteractiveCLI(console=console, profile_store=store)
+    cli = InteractiveCLI(workspace=tmp_path, data_root=tmp_path / "data", console=console, profile_store=store)
     await cli.run()
 
     assert "使用默认配置" in console.text
@@ -319,7 +319,7 @@ async def test_interactive_cli_model_command_switches_profile(tmp_path: Path) ->
     console = ScriptedConsole(
         answers=["/model", "2", "/exit"],
     )
-    cli = InteractiveCLI(console=console, profile_store=store)
+    cli = InteractiveCLI(workspace=tmp_path, data_root=tmp_path / "data", console=console, profile_store=store)
     await cli.run()
 
     assert "已切换：Mock（离线演示） / mock-add-demo" in console.text
@@ -343,7 +343,7 @@ async def test_legacy_single_profile_is_promoted_to_default_with_saved_key(
         )
     )
     console = ScriptedConsole(answers=["/exit"], secrets=["sk-new-key"])
-    cli = InteractiveCLI(console=console, profile_store=store)
+    cli = InteractiveCLI(workspace=tmp_path, data_root=tmp_path / "data", console=console, profile_store=store)
     await cli.run()
 
     loaded = store.load()[0]
@@ -357,7 +357,7 @@ async def test_console_secret_strips_terminal_newlines(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """API Key 输入不应把回车/换行符保存为 Key 的一部分。"""
-    import mini_harness.cli.app as cli_app
+    import mini_harness.cli.console as cli_app
 
     monkeypatch.setattr(
         cli_app.getpass,

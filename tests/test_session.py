@@ -70,7 +70,7 @@ def test_save_and_reload_restores_history(tmp_path: Path) -> None:
     first.save(session)
 
     assert first.path.exists()
-    assert json.loads(first.path.read_text(encoding="utf-8"))["schema_version"] == 1
+    assert json.loads(first.path.read_text(encoding="utf-8"))["schema_version"] == 2
 
     second = SessionManager(workspace, data_root=data_root)
     restored = second.load()

@@ -19,13 +19,8 @@ from typing import Any
 
 import pytest
 
-from mini_harness.memory.dream import (
-    BUSY_ERROR,
-    DREAM_SYSTEM_PROMPT,
-    DreamConfig,
-    DreamManager,
-    DreamScheduler,
-)
+from mini_harness.memory.dream import BUSY_ERROR, DREAM_SYSTEM_PROMPT, DreamConfig, DreamManager
+from mini_harness.memory.scheduler import DreamScheduler
 from mini_harness.memory.store import MemoryStore, MemoryStoreError
 from mini_harness.providers.base import LLMProvider, LLMResponse
 
@@ -616,3 +611,166 @@ def test_nothing_variants_are_accepted(store: MemoryStore) -> None:
     assert result.cursor == 1
     assert store.get_dream_cursor() == 1
     assert "摘要一" not in store.read_memory()
+
+
+@pytest.mark.parametrize("response", [RuntimeError("unavailable"), "invalid JSON"])
+async def test_stale_cursor_is_not_written_before_success(
+    store: MemoryStore, response: str | Exception,
+) -> None:
+    """恢复读取起点不能提前改 cursor；失败后重启仍可完整重放。"""
+    store.set_dream_cursor(99)
+    seed_history(store, "重建历史后的新事实")
+    store.write_memory("## 用户偏好\n- 原有偏好\n")
+    before_cursor = store.dream_cursor_file.read_bytes()
+    before_memory = store.memory_file.read_bytes()
+
+    result = await DreamManager(ScriptedProvider(response), store).run()
+
+    assert result.error is not None
+    assert result.cursor == 99
+    assert store.dream_cursor_file.read_bytes() == before_cursor
+    assert store.memory_file.read_bytes() == before_memory
+    recovered = await DreamManager(ScriptedProvider("(nothing)"), store).run()
+    assert recovered.error is None
+    assert recovered.cursor == 1
+
+
+async def test_disabled_run_does_not_reset_stale_cursor(store: MemoryStore) -> None:
+    store.set_dream_cursor(99)
+    seed_history(store, "新事实")
+    provider = ScriptedProvider()
+    result = await DreamManager(provider, store).run(max_entries=0)
+    assert result.cursor == store.get_dream_cursor() == 99
+    assert provider.call_count == 0
+
+
+async def test_dream_batches_complete_records_within_context_budget(
+    store: MemoryStore,
+) -> None:
+    from mini_harness.agent.context_types import ContextConfig
+    from mini_harness.agent.tokens import estimate_messages_tokens
+
+    seed_history(store, *(f"归档 {index}：" + "已确认的事实。" * 180 for index in range(4)))
+    provider = ScriptedProvider(*["(nothing)"] * 4)
+    config = ContextConfig(max_context_tokens=3072, reserve_output_tokens=256)
+    manager = DreamManager(provider, store, context_config=config)
+
+    first = await manager.run()
+    assert first.error is None
+    assert 0 < first.processed_entries < 4
+    assert first.cursor == first.processed_entries
+    while store.get_dream_cursor() < 4:
+        result = await manager.run()
+        assert result.error is None
+    for messages in provider.received_messages:
+        assert estimate_messages_tokens(messages) <= config.available_input_tokens
+    # 每条完整记录恰好出现一次，未发送的记录不提前推进 cursor。
+    combined = "\n".join(messages[1]["content"] for messages in provider.received_messages)
+    for index in range(4):
+        assert combined.count(f"归档 {index}：") == 1
+
+
+async def test_oversized_archive_is_fully_processed_in_fragments(store: MemoryStore) -> None:
+    from mini_harness.agent.context_types import ContextConfig
+    from mini_harness.agent.tokens import estimate_messages_tokens
+
+    content = "".join(f"事实{index:05d}。" for index in range(1200))
+    seed_history(store, content, "留给下一批的归档")
+    provider = ScriptedProvider(*["(nothing)"] * 100)
+    config = ContextConfig(max_context_tokens=2048, reserve_output_tokens=256)
+    result = await DreamManager(provider, store, context_config=config).run()
+
+    assert result.error is None
+    assert result.processed_entries == result.cursor == 1
+    assert store.get_dream_cursor() == 1
+    assert provider.call_count > 1
+    fragments = []
+    for messages in provider.received_messages:
+        assert estimate_messages_tokens(messages) <= config.available_input_tokens
+        user = messages[1]["content"]
+        fragment = user.split("的连续片段 ", 1)[1].split("]\n", 1)[1]
+        fragments.append(fragment.rsplit("\n\n请根据系统提示", 1)[0])
+    assert "".join(fragments) == content
+
+
+async def test_fragment_operations_are_committed_together(store: MemoryStore) -> None:
+    from mini_harness.agent.context_types import ContextConfig
+
+    seed_history(store, "超大归档正文。" * 1000)
+    provider = ScriptedProvider(
+        dream_json(add=[{"section": "项目决策", "text": "分片中提取的决策"}]),
+        dream_json(update=[{"old": "分片中提取的决策", "new": "后续片段修正的决策"}]),
+        *["(nothing)"] * 100,
+    )
+    config = ContextConfig(max_context_tokens=2048, reserve_output_tokens=256)
+
+    result = await DreamManager(provider, store, context_config=config).run()
+
+    assert result.error is None
+    assert result.added == result.updated == 1
+    assert result.cursor == store.get_dream_cursor() == 1
+    assert "后续片段修正的决策" in store.read_memory()
+    assert "分片中提取的决策" not in store.read_memory()
+
+
+async def test_fragment_failure_does_not_commit_partial_memory(store: MemoryStore) -> None:
+    from mini_harness.agent.context_types import ContextConfig
+
+    seed_history(store, "超大归档正文。" * 3000)
+    store.set_dream_cursor(99)
+    store.write_memory("## 项目决策\n- 原有决策\n")
+    before = store.memory_file.read_bytes()
+    provider = ScriptedProvider(
+        dream_json(add=[{"section": "项目决策", "text": "片段一的决策"}]),
+        RuntimeError("第二片失败"),
+    )
+    config = ContextConfig(max_context_tokens=2048, reserve_output_tokens=256)
+
+    result = await DreamManager(provider, store, context_config=config).run()
+
+    assert result.error is not None
+    assert provider.call_count == 2
+    assert store.memory_file.read_bytes() == before
+    assert store.get_dream_cursor() == result.cursor == 99
+
+
+async def test_large_memory_is_only_trimmed_in_request_copy(store: MemoryStore) -> None:
+    from mini_harness.agent.context_types import ContextConfig
+    from mini_harness.agent.tokens import estimate_messages_tokens
+
+    memory = "## 项目决策\n" + "- 已保存的项目决策\n" * 1500
+    store.write_memory(memory)
+    seed_history(store, "简短的新事实")
+    provider = ScriptedProvider("(nothing)")
+    config = ContextConfig(max_context_tokens=2048, reserve_output_tokens=256)
+
+    result = await DreamManager(provider, store, context_config=config).run()
+
+    assert result.error is None
+    assert store.read_memory() == memory
+    assert "记忆仅展示部分" in provider.received_messages[0][1]["content"]
+    assert estimate_messages_tokens(provider.received_messages[0]) <= config.available_input_tokens
+
+
+async def test_unfit_dream_prompt_fails_without_provider_call(store: MemoryStore) -> None:
+    from mini_harness.agent.context_types import ContextConfig
+
+    seed_history(store, "新事实")
+    provider = ScriptedProvider()
+    config = ContextConfig(max_context_tokens=1024, reserve_output_tokens=1000)
+    result = await DreamManager(provider, store, context_config=config).run()
+    assert result.error is not None and "预算不足" in result.error
+    assert result.llm_called is False
+    assert provider.call_count == 0
+    assert store.get_dream_cursor() == 0
+
+
+@pytest.mark.parametrize("finish_reason", ["length", "max_tokens"])
+async def test_truncated_dream_response_does_not_advance_cursor(
+    store: MemoryStore, finish_reason: str,
+) -> None:
+    seed_history(store, "新事实")
+    provider = ScriptedProvider(LLMResponse(content="(nothing)", finish_reason=finish_reason))
+    result = await DreamManager(provider, store).run()
+    assert result.error is not None and "截断" in result.error
+    assert store.get_dream_cursor() == 0

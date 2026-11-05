@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from mini_harness.agent import AgentRunner, AgentRunSpec, ContextConfig
-from mini_harness.agent.compaction import ContextGovernor
+from mini_harness.agent.governor import ContextGovernor
 from mini_harness.providers import LLMResponse, MockProvider, ToolCallRequest
 from mini_harness.tools import EditFileTool, FileInfoTool, FindFilesTool, ReadFileTool, RunCommandTool, ToolRegistry, WriteFileTool
 from mini_harness.workspace import WorkspaceResolver

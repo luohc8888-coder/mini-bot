@@ -442,3 +442,69 @@ def test_idle_failure_backoff_avoids_llm_retry_storm(tmp_path: Path) -> None:
     assert second is None
     assert third is None
     assert compactor.calls == ["idle"]
+
+
+def test_idle_transient_failure_backoff_and_reset(tmp_path: Path) -> None:
+    """按真实检查周期推进时指数退避；新 Session 保存后可重新尝试。"""
+    manager = make_manager(tmp_path)
+    save_messages(manager, make_complete_turn())
+    now = [time.time()]
+    set_session_mtime(manager, now[0] - 3600)
+    provider = RecordingSummaryProvider()
+
+    async def failing_chat(*args: Any, **kwargs: Any) -> LLMResponse:
+        provider.calls.append([])
+        raise RuntimeError("temporary provider failure")
+
+    provider.chat = failing_chat  # type: ignore[method-assign]
+    scheduler = IdleCompactionScheduler(
+        SessionCompactor(provider, manager), manager, clock=lambda: now[0],
+    )
+    assert asyncio.run(scheduler.check_once()).status == "failed"
+    now[0] += 60
+    assert asyncio.run(scheduler.check_once()).status == "failed"
+    now[0] += 60
+    assert asyncio.run(scheduler.check_once()) is None
+    now[0] += 60
+    assert asyncio.run(scheduler.check_once()).status == "failed"
+    now[0] += 60
+    assert asyncio.run(scheduler.check_once()) is None
+    assert len(provider.calls) == 3
+
+    session = manager.load()
+    session.messages.extend(make_complete_turn(2))
+    manager.save(session)
+    set_session_mtime(manager, now[0] - 1800)
+    assert asyncio.run(scheduler.check_once()).status == "failed"
+    assert len(provider.calls) == 4
+
+
+def test_idle_non_reducing_summary_waits_for_session_change(tmp_path: Path) -> None:
+    """不减少 Token 是稳定失败，隔多轮检查也不自动重试。"""
+    manager = make_manager(tmp_path)
+    save_messages(manager, [
+        {"role": "user", "content": "谢谢"},
+        {"role": "assistant", "content": "不客气"},
+    ])
+    now = [time.time()]
+    set_session_mtime(manager, now[0] - 3600)
+    provider = RecordingSummaryProvider("冗长摘要。" * 100)
+    scheduler = IdleCompactionScheduler(
+        SessionCompactor(provider, manager), manager, clock=lambda: now[0],
+    )
+
+    first = asyncio.run(scheduler.check_once())
+    assert first.status == "failed"
+    assert first.retryable is False
+    for seconds in (60, 120, 3600, 86400):
+        now[0] += seconds
+        assert asyncio.run(scheduler.check_once()) is None
+    assert len(provider.calls) == 1
+
+    session = manager.load()
+    session.messages.extend(make_complete_turn(2))
+    manager.save(session)
+    set_session_mtime(manager, now[0] - 1800)
+    provider.summary = "新增回合确认了项目目标。"
+    assert asyncio.run(scheduler.check_once()).status == "compacted"
+    assert len(provider.calls) == 2

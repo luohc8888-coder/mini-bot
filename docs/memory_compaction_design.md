@@ -33,7 +33,7 @@ class Session:
 要求：
 
 - `messages` 永远保存**完整原始历史**，压缩只移动 `summary_boundary`，绝不删除消息。
-- JSON 新增字段：`summary`、`summary_boundary`、`summary_checkpoint_id`；旧文件缺省时按空摘要加载（向后兼容，`schema_version` 保持 1）。
+- JSON 新增字段：`summary`、`summary_boundary`、`summary_checkpoint_id`；当前 `schema_version` 为 2，三个字段必须存在；旧文件通过 `mini-bot --migrate-session` 显式迁移并保留原始备份。
 - 校验：`summary` 必须是 str；`summary_boundary` 必须是 int、`0 <= boundary <= len(messages)`；`summary` 非空时 boundary 必须 >= 1；`summary_checkpoint_id` 必须是 str。
 - `save()` 不得修改传入的 `Session` 对象（现有测试 `restored == session` 依赖这一点）。
 - `clear()` 同时清空 messages 与 summary 字段。
@@ -100,6 +100,7 @@ class PersistentCompactionResult:
     checkpoint_id: str | None = None
     archive_cursor: int | None = None
     error: str | None = None
+    retryable: bool = True
 
 class SessionCompactor:
     def __init__(self, provider: LLMProvider, session_manager: SessionManager, *,
@@ -112,11 +113,12 @@ class SessionCompactor:
 
 要求：
 
-1. 只压缩 `session.messages[summary_boundary:]` 中**完整、合法**的用户轮次：
+1. 只压缩 `session.messages[summary_boundary:]` 中**已结束、协议合法**的用户轮次：
    - 以 user 开头；工具调用/结果完整（复用 `_is_valid_turn`）；
-   - 轮次最后一条必须是 assistant 且无 `tool_calls`（有最终回答）；
-   - 遇到第一个不完整轮次停止（当前未完成请求永远保留）。
-2. 复用 `ContextCompactor`：输入为 `[上一版 summary 消息（若有）, *本轮要归档消息]`，
+   - 最新轮次必须以最终 assistant 回答收尾；当前未完成请求永远保留；
+   - 已有下一条 user 的旧失败轮次允许参与摘要，仅在摘要副本中标注未完成，原始消息不变；
+   - 非法工具协议仍然停止，不伪造工具结果。
+2. 复用 `ContextCompactor`，统一返回 `CompactionOutcome`，不使用 `last_outcome` 旁路状态；前缀选择与摘要输入使用 `agent/transcript.py` 的同一套渲染和预算规则。输入为 `[上一版 summary 消息（若有）, *本轮要归档消息]`，
    通过 `protected_start=len(input)` 让全部输入成为可压缩历史。摘要失败时 Session 完全不变。
 3. `ContextCompactor.CompactionOutcome` 新增 `summary_text: str | None`（纯摘要正文，
    不含包装提示），持久化使用该字段。
@@ -124,13 +126,13 @@ class SessionCompactor:
    - 先构造新 `Session`（保留完整 messages），写入 `summary` / `summary_boundary` /
      `summary_checkpoint_id`，用 `SessionManager.save()` 单次原子替换；
    - 成功后尝试 `MemoryStore.append_history(...)` 归档；归档失败不影响 Session 压缩成功，
-     但在结果中记录错误日志。
-5. `summary_checkpoint_id` 由 `session_key + boundary + summary` 的 SHA-256 前 16 位生成。
+     但在结果中记录错误；下次 compact 先幂等补归档，成功后才生成新版摘要。
+5. `summary_checkpoint_id` 由 JSON 数组 `[session_key, boundary, summary]` 序列化后取 SHA-256 前 16 位生成。
 6. 同一 session 并发 compact：模块级 `asyncio.Lock` 字典；已持锁时立即返回 `status="busy"`，
    不排队、不重复调用 LLM。
 7. 无完整未归档轮次时 `status="nothing_to_compact"`，不调用 LLM。
 
-## 5. Dream（`mini_harness/memory/dream.py`）
+## 5. Dream（`memory/dream.py`、`document.py`、`scheduler.py`）
 
 ```python
 DREAM_SYSTEM_PROMPT: str
@@ -157,7 +159,8 @@ class DreamResult:
 
 class DreamManager:
     def __init__(self, provider: LLMProvider, store: MemoryStore,
-                 config: DreamConfig | None = None) -> None: ...
+                 config: DreamConfig | None = None, *,
+                 context_config: ContextConfig | None = None) -> None: ...
     async def run(self, *, max_entries: int | None = None) -> DreamResult: ...
 ```
 
@@ -177,6 +180,10 @@ Dream Prompt 要求 LLM 只返回 JSON（允许 ```json 围栏）：
 - 不保存闲聊、一次性问题、临时日志、完整工具输出、推测、重复记忆。
 - 无未处理记录：直接返回 `processed_entries=0, llm_called=False`，绝不调用 LLM。
 - 每次最多 `max_entries` 条；`llm_called=True` 当且仅当实际调用 Provider。
+- 每次请求都计算 System + MEMORY.md 预览 + 归档的 Token；输入上限扣除输出预留与安全余量，并受 Provider 窗口限制。预算不足以容纳提示时不调用 LLM。
+- 优先选择能完整放入预算的连续归档前缀；超大首条按正文分片，全部片段成功后才统一写记忆并推进 cursor，任何片段失败不写入部分结果。
+- MEMORY.md 仅裁剪发送副本，完整文档始终参与操作校验和去重；输出预算使用 Provider 的协程作用域，不覆盖主对话额度。
+- cursor 大于 history 最大 cursor 时，只把本次读取起点回退到 0；处理成功后再持久化新 cursor。
 - `MEMORY.md` 更新采用确定性操作应用，不直接接受 LLM 返回的整份文件：
   - `add`：按 section 归类；规范化（去首尾空白、压缩空白、去 bullet 前缀）后去重；
   - `update`：找到规范化后等于 `old` 的条目再替换；找不到则 `skipped += 1`；
@@ -184,7 +191,7 @@ Dream Prompt 要求 LLM 只返回 JSON（允许 ```json 围栏）：
   - 单条文本为空/超长（>2000 字符）/含控制字符时拒绝（`skipped += 1`）；
   - 最终文件超过 `max_memory_bytes` 时整次操作失败（不写文件、不推进 cursor）。
 - 只有 `MEMORY.md` 原子写入成功（或无需修改）后，才 `set_dream_cursor(batch[-1].cursor)`。
-- Provider 异常、空响应、非法 JSON、非法结构、写入失败：`error` 非空，cursor 不变，MEMORY.md 不变。
+- Provider 异常、空响应、输出截断、非法 JSON、非法结构、记忆写入失败：`error` 非空，cursor 不变，MEMORY.md 不变。cursor 写入失败时已写入的记忆保留，下次重放依靠去重恢复。
 - 实例内 `asyncio.Lock` 保证 `/dream` 与定时 Dream 互斥；已持锁返回 `busy=True, error="Dream 正在运行"`。
 - 重启后从 `.dream_cursor` 继续；重复处理同一批记录时去重保证 MEMORY.md 不重复。
 
@@ -227,6 +234,7 @@ class IdleCompactionScheduler:
   存在完整未归档历史 → **执行前再次检查空闲状态** → `compactor.compact(reason="idle")`。
 - 没有 Session/没有新历史/不空闲/正在执行时返回 None，且不得调用 LLM。
 - `run()` 每 `check_interval_seconds` 调用一次 `check_once`。
+- 临时失败按至少 60 秒起步指数退避，最大 1 小时，从失败完成时计时；摘要未减少 Token、整轮输入放不下等稳定失败，在 Session 指纹变化前不再自动重试。手动 `/compact` 不受此限制。
 
 ## 7. ContextBuilder 扩展（`mini_harness/agent/context.py`）
 
@@ -273,7 +281,7 @@ build_context(history, current_message=None, *, check_budget=True,
 ## 10. 不变量
 
 1. `Session.messages` 永远是完整原始历史；压缩只改变 `summary_boundary`。
-2. 任何 Provider 请求前都经过 `ContextGovernor.prepare_request`（现有逻辑不改）。
+2. 用户任务的每次 Provider 请求前经过 `ContextGovernor.prepare_request`；摘要和 Dream 维护请求使用各自的输入预算校验。
 3. Tool Call 与 Tool Result 的配对关系不得被任何新增逻辑破坏。
 4. 持久化顺序：Session 原子保存成功 → Memory Archive 追加；Dream 先写 MEMORY.md → 再推进 cursor。
 5. 所有失败路径都不得清空/破坏已有 Session、MEMORY.md、history.jsonl、.dream_cursor。

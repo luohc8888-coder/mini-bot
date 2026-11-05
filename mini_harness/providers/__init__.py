@@ -14,7 +14,6 @@ from .base import (
 from .config import ProviderConfig
 from .factory import (
     ProviderConfigurationError,
-    ProviderFactory,
     create_mock_provider,
     create_provider,
     resolve_api_key,
@@ -35,7 +34,6 @@ __all__ = [
     "ProviderConfig",
     "ProviderConfigurationError",
     "ProviderError",
-    "ProviderFactory",
     "ProviderPreset",
     "ResponseFactory",
     "TextDeltaCallback",

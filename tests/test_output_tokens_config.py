@@ -1,5 +1,6 @@
 """输出能力配置、请求额度隔离与已保存配置的严格校验。"""
 
+import asyncio
 from dataclasses import asdict
 import json
 from pathlib import Path
@@ -62,7 +63,7 @@ async def test_cli_reports_invalid_saved_output_settings(tmp_path: Path, fields:
     }]}))
     original = path.read_bytes()
     console = ScriptedConsole([])
-    await InteractiveCLI(console=console, profile_store=ProfileStore(path)).run()
+    await InteractiveCLI(workspace=tmp_path, data_root=tmp_path / "data", console=console, profile_store=ProfileStore(path)).run()
     assert "max_output_tokens" in console.text
     assert "test-secret" not in console.text
     assert path.read_bytes() == original
@@ -118,3 +119,88 @@ async def test_wire_output_budget_changes_without_mutating_capability(protocol: 
     assert provider.max_output_tokens == 12000
     assert provider.output_token_limit == 12000
     assert asdict(config) == original
+
+
+@pytest.mark.asyncio
+async def test_request_output_budget_is_local_to_task_and_restored() -> None:
+    provider = create_provider(ProviderConfig(provider="mock", max_output_tokens=4096))
+    provider.set_output_budget(3000)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def maintenance() -> None:
+        with provider.request_output_budget(256):
+            entered.set()
+            await release.wait()
+            assert provider.output_token_limit == 256
+        assert provider.output_token_limit == 2000
+
+    task = asyncio.create_task(maintenance())
+    await entered.wait()
+    assert provider.output_token_limit == 3000
+    provider.set_output_budget(2000)
+    release.set()
+    await task
+    assert provider.output_token_limit == 2000
+    with pytest.raises(RuntimeError):
+        with provider.request_output_budget(128):
+            assert provider.output_token_limit == 128
+            raise RuntimeError("failed request")
+    assert provider.output_token_limit == 2000
+
+
+@pytest.mark.asyncio
+async def test_request_output_budget_is_restored_after_cancellation() -> None:
+    provider = create_provider(ProviderConfig(provider="mock"))
+    entered = asyncio.Event()
+
+    async def maintenance() -> None:
+        try:
+            with provider.request_output_budget(128):
+                entered.set()
+                await asyncio.Event().wait()
+        finally:
+            assert provider.output_token_limit == provider.max_output_tokens
+
+    task = asyncio.create_task(maintenance())
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.parametrize("protocol", ["openai", "anthropic"])
+@pytest.mark.asyncio
+async def test_dream_wire_request_respects_window_and_preserves_main_budget(
+    tmp_path: Path, protocol: str,
+) -> None:
+    from mini_harness.agent.tokens import estimate_messages_tokens
+    from mini_harness.memory import DreamManager, MemoryStore
+
+    provider = create_provider(ProviderConfig(
+        provider="custom", protocol=protocol, model="m", api_key="test",
+        base_url="https://example.com/v1",
+        max_output_tokens=12000, context_window_tokens=2048,
+    ))
+    provider.set_output_budget(1500)
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        if protocol == "anthropic":
+            body = {"content": [{"type": "text", "text": "(nothing)"}], "stop_reason": "end_turn"}
+        else:
+            body = {"choices": [{"message": {"content": "(nothing)"}, "finish_reason": "stop"}]}
+        return httpx.Response(200, json=body)
+
+    provider.transport = httpx.MockTransport(handler)
+    store = MemoryStore(tmp_path)
+    store.append_history("项目使用 pytest", session_key="cli:main")
+    manager = DreamManager(provider, store)
+    result = await manager.run()
+    assert result.error is None
+    budget, _ = manager._request_limits()
+    _, messages = manager._build_requests("", store.read_history(), budget)
+    assert requests[0]["max_tokens"] == 2048 - estimate_messages_tokens(messages[0])
+    assert provider.output_token_limit == 1500
+    assert provider.max_output_tokens == 12000

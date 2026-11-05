@@ -23,7 +23,8 @@ from ..bus import InboundMessage, MessageBus
 from ..providers import create_mock_provider
 from ..workspace import WorkspaceError
 from ..tools import AddTool, ToolRegistry
-from . import print_provider_catalog, run_interactive_cli
+from .console import print_provider_catalog
+from .app import run_interactive_cli
 
 
 def build_demo_provider():
@@ -37,7 +38,7 @@ def build_demo_provider():
 
 
 async def run_demo() -> None:
-    """运行一次完整的 V0 工具调用闭环并打印最终答案。"""
+    """运行一次显式无状态的离线工具调用演示并打印最终答案。"""
     bus = MessageBus()
 
     registry = ToolRegistry()
@@ -45,7 +46,7 @@ async def run_demo() -> None:
 
     provider = build_demo_provider()
     runner = AgentRunner(provider=provider, tools=registry)
-    agent_loop = AgentLoop(bus=bus, runner=runner, max_iterations=32)
+    agent_loop = AgentLoop(stateless=True, bus=bus, runner=runner, max_iterations=32)
 
     # AgentLoop.run 是常驻循环，用 create_task 并发启动，主协程才能继续
     # 投递入站消息并等待出站结果。
@@ -81,7 +82,11 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         action="store_true",
         help="强制进入交互式 CLI",
     )
-    parser.add_argument(
+    mode.add_argument(
+        "--migrate-session", action="store_true",
+        help="显式迁移当前 Workspace 的旧 Session，保留原始备份后退出",
+    )
+    mode.add_argument(
         "--list-providers",
         action="store_true",
         help="列出所有内置 Provider 预设后退出",
@@ -199,6 +204,25 @@ async def main(argv: Sequence[str] | None = None) -> None:
 
     if args.demo:
         await run_demo()
+        return
+
+    if args.migrate_session:
+        from mini_harness.session import SessionError, SessionManager
+        from mini_harness.session.migration import migrate_session
+        from mini_harness.workspace import WorkspaceResolver
+
+        try:
+            manager = SessionManager(WorkspaceResolver().resolve(args.workspace))
+            result = migrate_session(manager)
+        except (SessionError, WorkspaceError) as exc:
+            print(f"Session 迁移失败：{exc}", file=sys.stderr)
+            raise SystemExit(1) from exc
+        if result.status == "migrated":
+            print(f"Session 已迁移；原始备份：{result.backup_path}")
+        elif result.status == "up_to_date":
+            print("Session 已是当前格式，无需迁移。")
+        else:
+            print("当前 Workspace 没有 Session，无需迁移。")
         return
 
     if args.interactive or sys.stdin.isatty():

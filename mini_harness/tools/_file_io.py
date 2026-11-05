@@ -10,6 +10,7 @@ from pathlib import Path
 _MAX_READ_BYTES = 2 * 1024 * 1024
 _MAX_EDIT_BYTES = 2 * 1024 * 1024
 
+
 def _atomic_write_text(target: Path, content: str) -> None:
     """用同目录临时文件 + ``os.replace`` 原子写入文本。
 

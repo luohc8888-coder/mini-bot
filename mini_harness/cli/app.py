@@ -1,55 +1,28 @@
 """Mini Harness 交互式 CLI。
 
 优先复用默认配置启动；没有默认配置时选择 Provider / 模型 / API Key。支持
-保存默认配置、通过 ``/model`` 切换 Provider/模型、``/settings`` 配置推理强度，以及 V1 的
+保存默认配置、通过 ``/model`` 切换 Provider/模型、``/settings`` 配置推理强度，以及
 Workspace 固定、Session 历史恢复、``/history`` 和 ``/clear``。
 """
 
 from __future__ import annotations
 
 import asyncio
-import getpass
 import json
-import os
-import re
-import sys
-from contextlib import nullcontext
-from dataclasses import dataclass, replace
 from pathlib import Path
 
 from mini_harness.agent import (
     AgentLoop,
     AgentRunner,
-    AgentRunSpec,
     ContextBuilder,
     ContextBudgetExceeded,
     ContextConfig,
 )
 from mini_harness.bus import InboundMessage, MessageBus, OutboundMessage
-from mini_harness.providers import (
-    LLMProvider,
-    ProviderConfig,
-    ProviderConfigurationError,
-    ProviderError,
-    ProviderPreset,
-    create_provider,
-    get_preset,
-    grouped_presets,
-)
-from mini_harness.providers.base import (
-    Message,
-    TextDeltaCallback,
-    ToolStartCallback,
-)
-from mini_harness.providers.config import (
-    DEFAULT_MAX_OUTPUT_TOKENS,
-    validate_max_output_tokens,
-)
-from mini_harness.session import (
-    SessionError,
-    SessionManager,
-    WorkspaceResolver,
-)
+from mini_harness.providers import LLMProvider, ProviderConfigurationError, create_provider
+from mini_harness.providers.base import TextDeltaCallback, ToolStartCallback
+from mini_harness.providers.config import validate_max_output_tokens
+from mini_harness.session import SessionError, SessionManager
 from mini_harness.tools import (
     AddTool,
     ApplyPatchTool,
@@ -64,178 +37,16 @@ from mini_harness.tools import (
     WriteFileTool,
 )
 
-from .profiles import ProfileStore, ProfileStoreError, ProviderProfile
+from mini_harness.workspace import WorkspaceResolver
+
+from .console import Console, StreamingAssistantRenderer
+from .settings import Selection, _AbortSelection, ProviderSettingsMixin
+from .runtime import MemoryMaintenanceMixin
+
+from .profiles import ProfileStore, ProfileStoreError
 
 
-@dataclass(slots=True)
-class Selection:
-    """CLI 当前选择的 Provider 配置。"""
-
-    config: ProviderConfig
-    preset: ProviderPreset
-    profile_name: str | None = None
-
-
-class _AbortSelection(Exception):
-    """用户在配置菜单中取消选择。"""
-
-
-class Console:
-    """终端输入输出封装；测试可替换为脚本化实现。
-
-    颜色只在交互式终端启用；重定向输出或设置
-    ``MINI_HARNESS_NO_COLOR=1`` 时自动关闭。
-    """
-
-    _USER_COLOR = "1;36"
-    _ASSISTANT_COLOR = "1;32"
-    _TOOL_COLOR = "33"
-    _ERROR_COLOR = "1;31"
-
-    def __init__(self, *, color: bool | None = None) -> None:
-        self.color = (
-            color
-            if color is not None
-            else bool(
-                sys.stdout.isatty()
-                and not os.getenv("MINI_HARNESS_NO_COLOR")
-            )
-        )
-
-    def _style(self, text: str, code: str) -> str:
-        """按需给文本加 ANSI 颜色；非 TTY 返回原文。"""
-        if not getattr(self, "color", False):
-            return text
-        return f"\033[{code}m{text}\033[0m"
-
-    def user_prompt(self) -> str:
-        """返回带颜色的用户输入提示符。"""
-        return self._style("你 > ", self._USER_COLOR)
-
-    def write(self, text: str = "") -> None:
-        """输出一行文本。"""
-        print(text)
-
-    def write_assistant(self, text: str) -> None:
-        """输出助手消息，角色标签使用绿色，并对多行内容做对齐缩进。"""
-        lines = text.strip("\n").splitlines() or [""]
-        label = self._style("助手 >", self._ASSISTANT_COLOR)
-        formatted = f"{label} {lines[0]}"
-        if len(lines) > 1:
-            padding = " " * len("助手 > ")
-            formatted += "\n" + "\n".join(
-                f"{padding}{line}" for line in lines[1:]
-            )
-        self.write(formatted)
-
-    def write_stream_start(self) -> None:
-        """开始一条流式助手消息，只打印一次角色标签。"""
-        label = self._style("助手 >", self._ASSISTANT_COLOR)
-        print(f"{label} ", end="", flush=True)
-
-    def write_stream_delta(self, text: str) -> None:
-        """打印一个流式文本片段，不自动换行。"""
-        print(text, end="", flush=True)
-
-    def write_stream_end(self) -> None:
-        """结束流式助手消息并换行。"""
-        print()
-
-    def write_tool(self, text: str) -> None:
-        """输出工具执行提示，使用黄色。"""
-        self.write(f"{self._style('[工具]', self._TOOL_COLOR)} {text}")
-
-    def write_error(self, text: str) -> None:
-        """输出错误信息，使用红色。"""
-        self.write(self._style(text, self._ERROR_COLOR))
-
-    async def read(self, prompt: str = "") -> str:
-        """异步读取一行普通输入。
-
-        ``input()`` 是阻塞调用，使用 ``asyncio.to_thread`` 放到线程中，
-        避免卡住正在运行的 asyncio 事件循环。
-
-        带 ANSI 颜色的提示符不能直接交给 ``input()``：readline 会误把
-        转义序列计入可见宽度，导致退格/删除键行为异常。此时先打印提示符，
-        再用空 prompt 读取输入。
-        """
-        if "\x1b[" in prompt:
-            print(prompt, end="", flush=True)
-            prompt = ""
-        return (await asyncio.to_thread(input, prompt)).strip()
-
-    async def read_secret(self, prompt: str = "") -> str:
-        """异步读取 API Key，终端输入不回显。
-
-        部分终端会在 getpass 返回值中带回 ``\\r``/``\\n``；这里显式清理，
-        避免换行符被当作 API Key 的一部分保存到配置中。
-        """
-        raw = await asyncio.to_thread(getpass.getpass, prompt)
-        return raw.replace("\r", "").replace("\n", "").strip()
-
-
-class StreamingAssistantRenderer:
-    """把 Provider 的文本增量渲染成一条连续的助手消息。"""
-
-    def __init__(self, console: Console) -> None:
-        self.console = console
-        self.started = False
-        self.has_output = False
-        self.tools_printed = False
-
-    def on_delta(self, text: str) -> None:
-        """收到一个文本片段；第一次收到时打印角色标签。"""
-        if not text:
-            return
-        if not self.started:
-            self.console.write_stream_start()
-            self.started = True
-        self.console.write_stream_delta(text)
-        self.has_output = True
-
-    def on_tool_start(self, name: str) -> None:
-        """在工具执行前结束当前文本行并打印工具提示。"""
-        self.finish()
-        self.console.write_tool(name)
-        self.tools_printed = True
-
-    def finish(self) -> None:
-        """结束当前流式消息；没有输出时不做任何事。"""
-        if self.started:
-            self.console.write_stream_end()
-            self.started = False
-
-
-def _format_base_url(preset: ProviderPreset) -> str:
-    """目录展示用 Base URL 文案。"""
-    if preset.default_base_url:
-        return preset.default_base_url
-    if preset.requires_base_url:
-        return "（需在 CLI 中输入）"
-    return "无需"
-
-
-def print_provider_catalog(console: Console | None = None) -> None:
-    """打印内置 Provider 目录，供 ``--list-providers`` 使用。"""
-    output = console or Console()
-    output.write("可用 Provider：")
-    for group_name, presets in grouped_presets():
-        output.write(f"\n[{group_name}]")
-        for preset in presets:
-            env_hint = (
-                "环境变量: " + " / ".join(preset.env_keys)
-                if preset.env_keys
-                else "无需 API Key"
-            )
-            output.write(
-                f"  - {preset.display_name} (key={preset.key})\n"
-                f"      默认模型: {preset.default_model or '需手动输入'}\n"
-                f"      Base URL: {_format_base_url(preset)}\n"
-                f"      {env_hint}"
-            )
-
-
-class InteractiveCLI:
+class InteractiveCLI(ProviderSettingsMixin, MemoryMaintenanceMixin):
     """交互式配置菜单与多轮聊天循环。"""
 
     def __init__(
@@ -267,8 +78,7 @@ class InteractiveCLI:
         """初始化 CLI 依赖。
 
         Args:
-            workspace: V1 Workspace；为 None 且未提供 SessionManager 时
-                保持 V0 无 Session 的兼容行为。
+            workspace: Workspace 路径；省略时使用当前工作目录。
             data_root: Session 数据根目录，便于测试或自定义 Harness 状态位置。
             session_manager: 可注入的已有 SessionManager，优先于 workspace。
             stream: 是否启用流式输出；``run_interactive_cli`` 默认开启，
@@ -311,21 +121,16 @@ class InteractiveCLI:
         self.tools.register(AddTool())
 
         if session_manager is not None:
-            self.session_manager: SessionManager | None = session_manager
-            self.workspace: Path | None = session_manager.workspace
-        elif workspace is not None or data_root is not None:
+            self.session_manager = session_manager
+            self.workspace = session_manager.workspace
+        else:
             resolved = WorkspaceResolver().resolve(workspace)
             self.session_manager = SessionManager(resolved, data_root=data_root)
             self.workspace = resolved.path
-        else:
-            # 兼容旧测试和作为库使用的 V0 调用方式；安装后的 CLI
-            # ``run_interactive_cli`` 总会显式传入 workspace。
-            self.session_manager = None
-            self.workspace = None
 
         # V2.2：长期记忆与持久化压缩运行态。Provider 在真正连接后绑定。
         self.memory_store = memory_store
-        if self.memory_store is None and self.workspace is not None:
+        if self.memory_store is None:
             try:
                 from mini_harness.memory.store import MemoryStore
 
@@ -345,29 +150,24 @@ class InteractiveCLI:
         self._active_provider: LLMProvider | None = None
 
         # 文件工具必须绑定固定的 Workspace，不能读取进程 cwd。
-        if self.workspace is not None:
-            file_workspace = WorkspaceResolver().resolve(self.workspace)
-            self.tools.register(FindFilesTool(file_workspace))
-            self.tools.register(GrepTool(file_workspace))
-            self.tools.register(ListDirTool(file_workspace))
-            self.tools.register(ReadFileTool(file_workspace))
-            self.tools.register(WriteFileTool(file_workspace))
-            self.tools.register(EditFileTool(file_workspace))
-            self.tools.register(ApplyPatchTool(file_workspace))
-            self.tools.register(FileInfoTool(file_workspace))
-            self.tools.register(RunCommandTool(file_workspace, confirm=self._confirm_command))
+        file_workspace = WorkspaceResolver().resolve(self.workspace)
+        self.tools.register(FindFilesTool(file_workspace))
+        self.tools.register(GrepTool(file_workspace))
+        self.tools.register(ListDirTool(file_workspace))
+        self.tools.register(ReadFileTool(file_workspace))
+        self.tools.register(WriteFileTool(file_workspace))
+        self.tools.register(EditFileTool(file_workspace))
+        self.tools.register(ApplyPatchTool(file_workspace))
+        self.tools.register(FileInfoTool(file_workspace))
+        self.tools.register(RunCommandTool(file_workspace, confirm=self._confirm_command))
 
         # V2：CLI 与 AgentLoop 共享同一个 ContextBuilder；Tool Schema 开销
         # 按当前注册表估算，文件工具必须已在上方注册完成。
-        self.context_builder: ContextBuilder | None = (
-            ContextBuilder(
-                self.workspace,
-                self.context_config,
-                tool_definitions=self.tools.get_definitions(),
-                memory_store=self.memory_store,
-            )
-            if self.workspace is not None
-            else None
+        self.context_builder = ContextBuilder(
+            self.workspace,
+            self.context_config,
+            tool_definitions=self.tools.get_definitions(),
+            memory_store=self.memory_store,
         )
 
     async def _confirm_command(self, command: str, cwd: str) -> bool:
@@ -379,212 +179,10 @@ class InteractiveCLI:
             return False
         return answer.strip().lower() == "yes"
 
-    def _ensure_memory_runtime(self, provider: LLMProvider | None) -> None:
-        """按当前 Provider 创建/更新持久化压缩与 Dream 运行态。"""
-        if provider is not None:
-            self._active_provider = provider
-        if self.session_manager is None or self.memory_store is None:
-            return
-        try:
-            from mini_harness.agent.session_compaction import SessionCompactor
-            from mini_harness.memory.dream import DreamConfig, DreamManager
-        except Exception:  # noqa: BLE001 - 新增模块不可用时保持基础对话
-            return
-
-        if self._session_compactor is None:
-            self._session_compactor = SessionCompactor(
-                self._active_provider,
-                self.session_manager,
-                memory_store=self.memory_store,
-                context_config=self.context_config,
-            )
-        else:
-            if self._active_provider is not None:
-                self._session_compactor.provider = self._active_provider
-            if getattr(self._session_compactor, "context_config", None) is not None:
-                self._session_compactor.context_config = self.context_config
-
-        if self._dream_manager is None:
-            self._dream_manager = DreamManager(
-                self._active_provider,
-                self.memory_store,
-                DreamConfig(
-                    enabled=(
-                        self.context_config.dream_enabled
-                        if self._dream_enabled is None
-                        else self._dream_enabled
-                    ),
-                    interval_hours=(
-                        self.context_config.dream_interval_hours
-                        if self._dream_interval_hours is None
-                        else self._dream_interval_hours
-                    ),
-                    max_entries=self.context_config.dream_max_entries,
-                ),
-            )
-        elif self._active_provider is not None:
-            self._dream_manager.provider = self._active_provider
-
-    def _bind_memory_provider(self, provider: LLMProvider) -> None:
-        """Provider 切换后同步后台压缩与 Dream，避免使用旧连接。"""
-        self._ensure_memory_runtime(provider)
-
-    def _start_maintenance(self) -> None:
-        """启动 Idle Compaction 与 Dream 后台任务（同一个 CLI 生命周期）。"""
-        if (
-            not self._maintenance_enabled
-            or self.session_manager is None
-            or self.memory_store is None
-        ):
-            return
-        if self._maintenance_tasks:
-            return
-        self._ensure_memory_runtime(self._active_provider)
-        try:
-            from mini_harness.agent.maintenance import IdleCompactionScheduler
-            from mini_harness.memory.dream import DreamScheduler
-        except Exception:  # noqa: BLE001 - 后台维护不可用不能阻止聊天
-            return
-
-        config = self.context_config
-        idle_after_minutes = (
-            config.idle_compact_after_minutes
-            if self._idle_compact_after_minutes is None
-            else self._idle_compact_after_minutes
-        )
-        dream_enabled = (
-            config.dream_enabled
-            if self._dream_enabled is None
-            else self._dream_enabled
-        )
-        dream_interval_hours = (
-            config.dream_interval_hours
-            if self._dream_interval_hours is None
-            else self._dream_interval_hours
-        )
-        if (
-            self._session_compactor is not None
-            and idle_after_minutes > 0
-            and config.idle_compact_check_interval_seconds > 0
-        ):
-            self._idle_scheduler = IdleCompactionScheduler(
-                self._session_compactor,
-                self.session_manager,
-                idle_after_minutes=idle_after_minutes,
-                check_interval_seconds=config.idle_compact_check_interval_seconds,
-            )
-            task = self._idle_scheduler.start()
-            if task is not None:
-                self._maintenance_tasks.append(task)
-
-        if self._dream_manager is not None and dream_enabled:
-            self._dream_scheduler = DreamScheduler(
-                self._dream_manager,
-                interval_hours=dream_interval_hours,
-                run_on_start=True,
-            )
-            task = self._dream_scheduler.start()
-            if task is not None:
-                self._maintenance_tasks.append(task)
-
-    async def _stop_maintenance(self) -> None:
-        """停止后台维护任务，确保 CLI 退出时没有悬挂协程。"""
-        for scheduler in (self._idle_scheduler, self._dream_scheduler):
-            if scheduler is not None:
-                try:
-                    await scheduler.stop()
-                except Exception:  # noqa: BLE001 - 退出清理不应掩盖主错误
-                    pass
-        tasks = [task for task in self._maintenance_tasks if not task.done()]
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        self._maintenance_tasks.clear()
-        self._idle_scheduler = None
-        self._dream_scheduler = None
-
-    async def _handle_compact_command(self) -> None:
-        """处理 ``/compact``：不依赖 Token 阈值与空闲时间。"""
-        if self.session_manager is None or self.memory_store is None:
-            self.console.write("当前没有可压缩的 Session。")
-            return
-        self._ensure_memory_runtime(self._active_provider)
-        if self._session_compactor is None:
-            self.console.write("压缩功能不可用：SessionCompactor 未初始化。")
-            return
-        try:
-            result = await self._session_compactor.compact(reason="manual")
-        except Exception as exc:  # noqa: BLE001 - 命令错误不能打崩 CLI
-            self.console.write_error(f"压缩失败：{type(exc).__name__}: {exc}")
-            return
-        status = getattr(result, "status", "failed")
-        if status == "compacted":
-            message = (
-                f"压缩成功：已归档 {result.summarized_messages} 条历史，"
-                f"Summary 已保存（边界 {result.boundary}，"
-                f"checkpoint {result.checkpoint_id or '无'}）。"
-            )
-            if getattr(result, "archive_cursor", None) is not None:
-                message += f" Memory Archive cursor={result.archive_cursor}。"
-            if getattr(result, "error", None):
-                message += f" 归档提示：{result.error}"
-            self.console.write(message)
-            return
-        if status == "nothing_to_compact":
-            if getattr(result, "archive_cursor", None) is not None:
-                self.console.write(
-                    "没有新的未归档历史；已补归档 Summary 到 Memory Archive"
-                    f"（cursor={result.archive_cursor}）。"
-                )
-            else:
-                self.console.write("没有新的未归档历史，无需压缩。")
-            return
-        if status == "busy":
-            self.console.write("当前 Session 正在压缩，请稍后再试。")
-            return
-        self.console.write_error(
-            f"压缩失败：{getattr(result, 'error', None) or '未知原因'}"
-        )
-
-    async def _handle_dream_command(self) -> None:
-        """处理 ``/dream``：手动触发长期记忆整理。"""
-        if self.session_manager is None or self.memory_store is None:
-            self.console.write("当前没有可用的长期记忆存储。")
-            return
-        self._ensure_memory_runtime(self._active_provider)
-        if self._dream_manager is None:
-            self.console.write("Dream 不可用：DreamManager 未初始化。")
-            return
-        try:
-            result = await self._dream_manager.run()
-        except Exception as exc:  # noqa: BLE001 - 命令错误不能打崩 CLI
-            self.console.write_error(f"Dream 失败：{type(exc).__name__}: {exc}")
-            return
-        if getattr(result, "busy", False):
-            self.console.write("Dream 正在运行，请稍后再试。")
-            return
-        if getattr(result, "error", None):
-            self.console.write_error(f"Dream 失败：{result.error}")
-            return
-        if result.processed_entries <= 0:
-            self.console.write("没有待处理的归档摘要，Dream 已跳过（未调用模型）。")
-            return
-        self.console.write(
-            f"Dream 完成：处理 {result.processed_entries} 条归档摘要，"
-            f"新增 {result.added} 条、更新 {result.updated} 条、"
-            f"删除 {result.removed} 条、跳过 {result.skipped} 条；"
-            f"cursor={result.cursor}，"
-            f"MEMORY.md {'已更新' if result.memory_updated else '无变化'}。"
-        )
 
     async def run(self) -> None:
         """运行配置选择与聊天主循环。"""
-        lock_context = (
-            self.session_manager.lock()
-            if self.session_manager is not None
-            else nullcontext()
-        )
+        lock_context = self.session_manager.lock()
         try:
             with lock_context:
                 try:
@@ -628,440 +226,37 @@ class InteractiveCLI:
             self.console.write_error(str(exc))
 
     def _show_banner(self) -> None:
-        """显示 V2 启动摘要或 V0 兼容欢迎信息。"""
+        """显示当前 Workspace / Session / 上下文预算。"""
         self.console.write("")
-        if self.session_manager is not None:
-            session = self.session_manager.load()
-            self.console.write("Mini Harness V2")
-            self.console.write(f"Workspace: {self.workspace}")
-            self.console.write(f"Session: {self.session_manager.session_key}")
-            self.console.write(f"History: {len(session.messages)} messages")
-            self.console.write(f"Loaded messages: {len(session.messages)}")
-            if session.summary:
-                self.console.write(
-                    f"Summary: 已归档 {session.summary_boundary} 条历史"
-                )
+        session = self.session_manager.load()
+        self.console.write("Mini Harness V2.2")
+        self.console.write(f"Workspace: {self.workspace}")
+        self.console.write(f"Session: {self.session_manager.session_key}")
+        self.console.write(f"History: {len(session.messages)} messages")
+        self.console.write(f"Loaded messages: {len(session.messages)}")
+        if session.summary:
             self.console.write(
-                f"Context budget: {self.context_config.available_input_tokens} "
-                f"input tokens (max {self.context_config.max_context_tokens}, "
-                f"reserve {self.context_config.reserve_output_tokens})"
+                f"Summary: 已归档 {session.summary_boundary} 条历史"
             )
-            self.console.write(f"配置文件：{self.store.path}")
-            self.console.write(
-                "输入 /help 查看命令；输入 /context 查看上下文预算；"
-                "输入 /compact 压缩历史；输入 /dream 整理长期记忆；"
-                "输入 /exit 退出。"
-            )
-            return
-
-        self.console.write("=" * 56)
-        self.console.write("  Mini Harness Interactive CLI")
-        self.console.write("=" * 56)
-        self.console.write("输入 /help 查看命令；输入 /exit 退出。")
-        self.console.write(f"配置文件：{self.store.path}")
-
-    async def _select_config(self, *, force_menu: bool = False) -> Selection | None:
-        """展示已有配置或创建新配置。
-
-        Args:
-            force_menu: 为 True 时即使存在默认配置也显示选择菜单，供
-                ``/model`` 主动切换使用。
-        """
-        profiles = self.store.load()
-        if not profiles:
-            self.console.write("\n尚未保存配置，先创建一个运行配置。")
-            return await self._create_config()
-
-        if not force_menu:
-            default = self.store.default_profile()
-            if default is not None:
-                try:
-                    selection = await self._config_from_profile(default)
-                except ProviderConfigurationError as exc:
-                    self.console.write(f"默认配置不可用：{exc}")
-                else:
-                    self.console.write(
-                        f"使用默认配置：{default.name} "
-                        f"({default.provider} / {default.model})"
-                    )
-                    return selection
-
-        default = self.store.default_profile()
-        default_name = default.name if default is not None else ""
-        while True:
-            self.console.write("\n选择配置：")
-            for index, profile in enumerate(profiles, start=1):
-                marker = " [默认]" if profile.name == default_name else ""
-                self.console.write(
-                    f"  {index}. {profile.name} "
-                    f"({profile.provider} / {profile.model}){marker}"
-                )
-            new_index = len(profiles) + 1
-            self.console.write(f"  {new_index}. 新建配置")
-            self.console.write("  q. 退出")
-
-            answer = await self.console.read("请选择 [1]: ")
-            answer = answer or "1"
-            if answer.lower() in {"q", "quit", "exit"}:
-                return None
-
-            try:
-                choice = int(answer)
-            except ValueError:
-                self.console.write("请输入有效序号。")
-                continue
-
-            if 1 <= choice <= len(profiles):
-                try:
-                    selection = await self._config_from_profile(
-                        profiles[choice - 1]
-                    )
-                except ProviderConfigurationError as exc:
-                    self.console.write(f"配置不可用：{exc}")
-                    continue
-                try:
-                    self.store.set_default(profiles[choice - 1].name)
-                except OSError as exc:
-                    self.console.write(f"默认配置保存失败：{exc}")
-                return selection
-            if choice == new_index:
-                return await self._create_config()
-            self.console.write("序号超出范围，请重新选择。")
-
-    async def _create_config(self) -> Selection:
-        """交互式创建新配置，并默认保存为下次启动使用的配置。"""
-        preset = await self._choose_preset()
-        model = await self._choose_model(preset)
-        base_url = await self._choose_base_url(preset)
-        api_key = await self._choose_api_key(preset)
-
-        config = ProviderConfig(
-            provider=preset.key,
-            model=model,
-            api_key=api_key,
-            base_url=base_url,
-            max_output_tokens=(
-                self.max_output_tokens
-                if self.max_output_tokens is not None
-                else DEFAULT_MAX_OUTPUT_TOKENS
-            ),
-            context_window_tokens=self.context_window_tokens,
-            thinking=self.thinking,
-            reasoning_effort=self.reasoning_effort,
-        )
-        if preset.protocol == "openai":
-            effort = await self._choose_reasoning_effort(config)
-            config = replace(
-                config, reasoning_effort=effort,
-                thinking=bool(effort) or (effort == config.reasoning_effort and config.thinking),
-            )
-
-        profile_name = None
-        if preset.protocol != "mock":
-            save = await self._confirm("保存为默认配置? [Y/n]: ", default=True)
-            if save:
-                default_name = f"{preset.display_name} / {model}"
-                name = await self.console.read(f"配置名称 [{default_name}]: ")
-                profile = ProviderProfile.from_config(
-                    name or default_name,
-                    config,
-                )
-                try:
-                    self.store.upsert(profile, set_default=True)
-                except OSError as exc:
-                    self.console.write(f"配置保存失败，将继续使用当前配置：{exc}")
-                else:
-                    profile_name = profile.name
-                    saved_hint = (
-                        "（含 API Key）" if profile.api_key else ""
-                    )
-                    self.console.write(
-                        f"已保存默认配置：{profile.name}{saved_hint}"
-                    )
-
-        return Selection(config=config, preset=preset, profile_name=profile_name)
-
-    async def _config_from_profile(self, profile: ProviderProfile) -> Selection:
-        """将保存的 profile 恢复为运行配置。"""
-        try:
-            preset = get_preset(profile.provider)
-        except ValueError as exc:
-            raise ProviderConfigurationError(str(exc)) from exc
-
-        base_url = profile.base_url
-        if not base_url and preset.requires_base_url:
-            base_url = await self._choose_base_url(preset)
-        elif not base_url:
-            base_url = preset.default_base_url
-
-        api_key = profile.api_key
-        if not api_key:
-            api_key = await self._choose_api_key(preset)
-            if api_key:
-                # 首次为旧 profile 输入 Key 后补写，下次启动即可直接复用。
-                try:
-                    self.store.upsert(
-                        replace(profile, api_key=api_key),
-                        set_default=True,
-                    )
-                except OSError as exc:
-                    self.console.write(f"API Key 保存失败：{exc}")
-        config = ProviderConfig(
-            provider=profile.provider,
-            model=profile.model,
-            api_key=api_key,
-            base_url=base_url,
-            temperature=profile.temperature,
-            max_output_tokens=profile.max_output_tokens,
-            context_window_tokens=profile.context_window_tokens,
-            thinking=profile.thinking,
-            reasoning_effort=profile.reasoning_effort,
-        )
-        return Selection(
-            config=self._apply_runtime_overrides(config),
-            preset=preset,
-            profile_name=profile.name,
-        )
-
-    async def _choose_reasoning_effort(self, config: ProviderConfig) -> str:
-        """选择推理档位；回车保持当前值，0 恢复端点默认。"""
-        model = config.model.lower().rsplit("/", 1)[-1]
-        levels = (
-            ("low", "high", "max")
-            if model.startswith("deepseek-v4.1") or model == "deepseek-flash"
-            else ("low", "medium", "high", "xhigh", "max")
-        )
-        self.console.write(f"\n推理强度设置（{config.model}）")
-        self.console.write(f"当前：{config.reasoning_effort or '端点默认'}")
-        self.console.write("  0. 端点默认")
-        for index, level in enumerate(levels, start=1):
-            self.console.write(f"  {index}. {level}")
-        self.console.write("  c. 自定义档位（按模型端点支持的值填写）")
-        self.console.write("  q. 取消")
-        while True:
-            answer = (await self.console.read("选择推理强度 [回车保留]: ")).strip().lower()
-            if not answer:
-                return config.reasoning_effort
-            if answer in {"q", "quit"}:
-                raise _AbortSelection
-            if answer in {"0", "default"}:
-                return ""
-            if answer in levels:
-                return answer
-            if answer.isdigit() and 1 <= int(answer) <= len(levels):
-                return levels[int(answer) - 1]
-            if answer == "c":
-                custom = (await self.console.read("自定义推理档位: ")).strip()
-                if custom.lower() in {"q", "quit"}:
-                    raise _AbortSelection
-                if re.fullmatch(r"[A-Za-z0-9_-]+", custom):
-                    return custom
-            self.console.write("请选择有效序号或档位名称。")
-
-    async def _edit_reasoning_settings(
-        self, selection: Selection
-    ) -> tuple[LLMProvider, Selection] | None:
-        """保存当前 profile 的推理设置，重建 Provider 后立即生效。"""
-        if (selection.config.protocol or selection.preset.protocol) != "openai":
-            self.console.write("当前 Provider 适配器不支持推理强度设置。")
-            return None
-        try:
-            effort = await self._choose_reasoning_effort(selection.config)
-        except (_AbortSelection, EOFError):
-            self.console.write("已取消推理设置。")
-            return None
-        config = replace(
-            selection.config, reasoning_effort=effort,
-            thinking=bool(effort) or (
-                effort == selection.config.reasoning_effort and selection.config.thinking
-            ),
-        )
-        try:
-            provider = create_provider(config)
-        except ProviderConfigurationError as exc:
-            self.console.write_error(f"配置错误：{exc}")
-            return None
-        profile = next(
-            (p for p in self.store.load() if p.name == selection.profile_name), None
-        )
-        if profile is not None:
-            try:
-                self.store.upsert(replace(profile, reasoning_effort=effort, thinking=config.thinking))
-            except OSError as exc:
-                self.console.write_error(f"推理设置保存失败，仅本次连接生效：{exc}")
-            else:
-                self.console.write(f"已保存推理设置：{profile.name}")
-        else:
-            self.console.write("推理设置已应用到本次连接（当前配置未保存）。")
-        updated = replace(selection, config=config)
-        self._activate_selection(updated)
-        return provider, updated
-
-    def _apply_runtime_overrides(self, config: ProviderConfig) -> ProviderConfig:
-        """命令行能力选项也覆盖已保存配置，不能只在创建 profile 时生效。"""
-        return replace(
-            config,
-            context_window_tokens=self.context_window_tokens or config.context_window_tokens,
-            max_output_tokens=(
-                self.max_output_tokens
-                if self.max_output_tokens is not None
-                else config.max_output_tokens
-            ),
-            thinking=self.thinking or config.thinking,
-            reasoning_effort=self.reasoning_effort or config.reasoning_effort,
-        )
-
-    def _activate_selection(self, selection: Selection) -> None:
-        """连接/切换模型后立即同步预算，首次 /context 也显示真实配置。"""
-        self.context_config = self._effective_context_config(selection)
-        if self.context_builder is not None:
-            self.context_builder.config = self.context_config
-        if self._session_compactor is not None:
-            self._session_compactor.context_config = self.context_config
         self.console.write(
-            f"模型预算：上下文 {self.context_config.max_context_tokens} tokens，"
-            f"输入预算 {self.context_config.available_input_tokens}，"
-            f"最大输出 {selection.config.max_output_tokens}；"
-            f"思考={'请求开启' if selection.config.thinking else '端点默认'}，"
-            f"推理档位={selection.config.reasoning_effort or '端点默认'}"
+            f"Context budget: {self.context_config.available_input_tokens} "
+            f"input tokens (max {self.context_config.max_context_tokens}, "
+            f"reserve {self.context_config.reserve_output_tokens})"
         )
-        if not selection.config.context_window_tokens and not self._max_context_tokens_override:
-            self.console.write(
-                "模型上下文能力未配置，当前使用 8K 回退值；"
-                "可用 --context-window-tokens 指定端点支持的上限。"
-            )
+        self.console.write(f"配置文件：{self.store.path}")
+        self.console.write(
+            "输入 /help 查看命令；输入 /context 查看上下文预算；"
+            "输入 /compact 压缩历史；输入 /dream 整理长期记忆；"
+            "输入 /exit 退出。"
+        )
 
-    async def _choose_preset(self) -> ProviderPreset:
-        """展示分组 Provider 菜单并返回选择。"""
-        self.console.write("\n选择 Provider：")
-        numbered: list[ProviderPreset] = []
-        for group_name, presets in grouped_presets():
-            self.console.write(f"\n[{group_name}]")
-            for preset in presets:
-                numbered.append(preset)
-                self.console.write(
-                    f"  {len(numbered):2}. {preset.display_name} "
-                    f"({preset.key})"
-                )
-
-        while True:
-            answer = await self.console.read(f"请选择 Provider [1-{len(numbered)}]: ")
-            if answer.lower() in {"q", "quit"}:
-                raise _AbortSelection
-            answer = answer or "1"
-            try:
-                choice = int(answer)
-            except ValueError:
-                self.console.write("请输入有效序号。")
-                continue
-            if 1 <= choice <= len(numbered):
-                return numbered[choice - 1]
-            self.console.write("序号超出范围，请重新选择。")
-
-    async def _choose_model(self, preset: ProviderPreset) -> str:
-        """展示模型建议并允许选择或输入自定义模型 ID。"""
-        if not preset.models:
-            while True:
-                model = await self.console.read("模型 ID（必填）: ")
-                if model:
-                    return model
-                self.console.write("模型 ID 不能为空。")
-
-        self.console.write("\n选择模型：")
-        default_index = 1
-        if preset.default_model in preset.models:
-            default_index = preset.models.index(preset.default_model) + 1
-        for index, model in enumerate(preset.models, start=1):
-            self.console.write(f"  {index}. {model}")
-        self.console.write("  0. 自定义模型 ID")
-
-        while True:
-            answer = await self.console.read(f"请选择模型 [{default_index}]: ")
-            answer = answer or str(default_index)
-            try:
-                choice = int(answer)
-            except ValueError:
-                self.console.write("请输入有效序号。")
-                continue
-            if choice == 0:
-                model = await self.console.read("模型 ID: ")
-                if model:
-                    return model
-                self.console.write("模型 ID 不能为空。")
-                continue
-            if 1 <= choice <= len(preset.models):
-                return preset.models[choice - 1]
-            self.console.write("序号超出范围，请重新选择。")
-
-    async def _choose_base_url(self, preset: ProviderPreset) -> str:
-        """选择或输入 Base URL。"""
-        if preset.default_base_url:
-            value = await self.console.read(
-                f"Base URL [{preset.default_base_url}]: "
-            )
-            return value or preset.default_base_url
-
-        if preset.base_url_env:
-            env_base_url = os.getenv(preset.base_url_env, "").strip()
-            if env_base_url:
-                value = await self.console.read(
-                    f"Base URL [{env_base_url}]: "
-                )
-                return value or env_base_url
-
-        if not preset.requires_base_url:
-            return ""
-
-        while True:
-            value = await self.console.read("Base URL（必填）: ")
-            if value:
-                return value
-            self.console.write("Base URL 不能为空。")
-
-    async def _choose_api_key(self, preset: ProviderPreset) -> str:
-        """解析 API Key：环境变量优先，否则在当前会话中输入。"""
-        if preset.protocol == "mock":
-            return ""
-        if not preset.api_key_required and not preset.env_keys:
-            return ""
-
-        if preset.env_keys:
-            for env_name in preset.env_keys:
-                env_value = os.getenv(env_name, "").strip()
-                if env_value:
-                    self.console.write(
-                        f"检测到环境变量 {env_name}，将使用其中的 API Key。"
-                    )
-                    return ""
-
-        if preset.api_key_required:
-            env_label = preset.env_keys[0] if preset.env_keys else "必填"
-            while True:
-                key = await self.console.read_secret(f"API Key（{env_label}）: ")
-                if key:
-                    return key
-                self.console.write("API Key 不能为空。")
-
-        if preset.key == "custom":
-            self.console.write(
-                "提示：自定义端点如需鉴权，请填写 API Key；"
-                "本地无鉴权服务可直接回车。"
-            )
-        return await self.console.read_secret("API Key（可留空）: ")
-
-    async def _confirm(self, prompt: str, *, default: bool) -> bool:
-        """读取 y/N 确认。"""
-        answer = (await self.console.read(prompt)).lower()
-        if not answer:
-            return default
-        return answer in {"y", "yes", "是"}
-
-    async def _chat_loop_with_session(
+    async def _chat_loop(
         self,
         provider: LLMProvider,
         selection: Selection,
     ) -> bool:
-        """V1：每个用户回合通过 MessageBus + AgentLoop 执行并持久化。"""
+        """每个用户回合通过同一条 Session / MessageBus 路径执行。"""
+        self._activate_selection(selection)
         self.console.write("")
         self.console.write(
             f"已连接：{selection.preset.display_name} / {selection.config.model}"
@@ -1126,10 +321,7 @@ class InteractiveCLI:
                 except SessionError as exc:
                     self.console.write_error(f"清空 Session 失败：{exc}")
                 else:
-                    if self.context_builder is not None:
-                        self.context_builder.last_request_messages = None
-                        self.context_builder.last_tool_definitions = None
-                        self.context_builder.last_provider_request = None
+                    self.context_builder.last_provider_request = None
                     self.console.write("已清空当前 Session 历史。")
                 continue
             if command in {"/config", "/model"}:
@@ -1202,51 +394,6 @@ class InteractiveCLI:
             if not outbound.metadata.get("streamed"):
                 self.console.write_assistant(answer)
 
-    def _effective_context_config(self, selection: Selection) -> ContextConfig:
-        """按当前 profile 的模型能力解析本轮上下文预算。"""
-        config = selection.config
-        context_window = (
-            self._max_context_tokens_override or config.context_window_tokens
-        )
-        max_output = config.max_output_tokens
-        base = getattr(self, "_base_context_config", self.context_config)
-        if context_window <= 0:
-            return replace(
-                base,
-                reserve_output_tokens=self._reserve_output_tokens_override or base.reserve_output_tokens,
-            )
-        if max_output >= context_window:
-            max_output = min(4096, max(1, context_window // 4))
-        return ContextConfig(
-            max_context_tokens=context_window,
-            # 能力上限不等于每轮固定预留：实际输出由 Governor 按剩余
-            # 窗口动态分配，否则 384K 最大输出会白白吃掉 384K 输入空间。
-            reserve_output_tokens=self._reserve_output_tokens_override or min(max_output, 4096),
-            include_agents_md=base.include_agents_md,
-            agents_md_max_bytes=base.agents_md_max_bytes,
-            safety_margin_tokens=base.safety_margin_tokens,
-            compact_soft_ratio=base.compact_soft_ratio,
-            max_tool_result_tokens=base.max_tool_result_tokens,
-            enable_auto_compact=base.enable_auto_compact,
-            memory_max_tokens=base.memory_max_tokens,
-            idle_compact_after_minutes=(
-                base.idle_compact_after_minutes
-                if self._idle_compact_after_minutes is None
-                else self._idle_compact_after_minutes
-            ),
-            idle_compact_check_interval_seconds=base.idle_compact_check_interval_seconds,
-            dream_enabled=(
-                base.dream_enabled
-                if self._dream_enabled is None
-                else self._dream_enabled
-            ),
-            dream_interval_hours=(
-                base.dream_interval_hours
-                if self._dream_interval_hours is None
-                else self._dream_interval_hours
-            ),
-            dream_max_entries=base.dream_max_entries,
-        )
 
     async def _run_session_turn(
         self,
@@ -1377,9 +524,6 @@ class InteractiveCLI:
         LLM 调用，也不会打印完整聊天正文或 API Key。统计中的
         ``估算输入 Token`` 不含当前尚未输入的下一句用户消息。
         """
-        if self.context_builder is None or self.session_manager is None:
-            self.console.write("当前为 V0 兼容模式，没有 Session 上下文信息。")
-            return
         try:
             session = self.session_manager.load()
         except SessionError as exc:
@@ -1468,20 +612,8 @@ class InteractiveCLI:
         实际工具消息数），而不是 ContextBuilder 初次构建的版本。快照只
         保存在内存中，不包含 API Key 或认证 Header。
         """
-        snapshot = (
-            self.context_builder.last_provider_request
-            if self.context_builder is not None
-            else None
-        )
-        messages = (
-            snapshot.messages
-            if snapshot is not None
-            else (
-                self.context_builder.last_request_messages
-                if self.context_builder is not None
-                else None
-            )
-        )
+        snapshot = self.context_builder.last_provider_request
+        messages = snapshot.messages if snapshot is not None else None
         if not messages:
             self.console.write("当前进程还没有发送过模型请求。")
             return
@@ -1533,15 +665,7 @@ class InteractiveCLI:
             if message.get("name"):
                 self.console.write(f"name: {message['name']}")
 
-        tool_definitions = (
-            snapshot.tool_definitions
-            if snapshot is not None
-            else (
-                self.context_builder.last_tool_definitions
-                if self.context_builder is not None
-                else None
-            )
-        )
+        tool_definitions = snapshot.tool_definitions if snapshot is not None else None
         self.console.write("")
         if tool_definitions:
             self.console.write(
@@ -1581,142 +705,6 @@ class InteractiveCLI:
         return ", ".join(
             f"{role}={count}" for role, count in sorted(counts.items())
         )
-
-    async def _chat_loop(
-        self,
-        provider: LLMProvider,
-        selection: Selection,
-    ) -> bool:
-        """运行多轮聊天；返回 False 表示退出。"""
-        self._activate_selection(selection)
-        if self.session_manager is not None:
-            return await self._chat_loop_with_session(provider, selection)
-        runner = AgentRunner(provider=provider, tools=self.tools, context_config=self.context_config)
-        messages: list[Message] = []
-
-        self.console.write("")
-        self.console.write(
-            f"已连接：{selection.preset.display_name} / {selection.config.model}"
-        )
-        self.console.write(
-            "命令：/model 切换厂商或模型  /settings 推理设置  /clear 清空上下文  "
-            "/tools 查看工具  /help 帮助  /exit 退出"
-        )
-
-        while True:
-            try:
-                user_text = await self.console.read(self.console.user_prompt())
-            except EOFError:
-                self.console.write("")
-                return False
-
-            if not user_text:
-                continue
-
-            command = user_text.lower()
-            if command in {"/exit", "/quit", "exit", "quit"}:
-                return False
-            if command == "/help":
-                self.console.write(
-                    "/model 或 /config 切换 Provider/模型（保留当前上下文）；"
-                    "/settings 设置并保存当前模型的推理强度；"
-                    "/clear 清空消息历史；/tools 查看已注册工具；/exit 退出。"
-                )
-                continue
-            if command == "/settings":
-                updated = await self._edit_reasoning_settings(selection)
-                if updated is not None:
-                    provider, selection = updated
-                    runner = AgentRunner(provider=provider, tools=self.tools, context_config=self.context_config)
-                continue
-            if command == "/clear":
-                messages.clear()
-                self.console.write("已清空当前会话上下文。")
-                continue
-            if command in {"/config", "/model"}:
-                self.console.write(
-                    "选择新的 Provider / 模型；当前会话上下文保留。"
-                )
-                try:
-                    new_selection = await self._select_config(force_menu=True)
-                except _AbortSelection:
-                    self.console.write("已取消切换。")
-                    continue
-                if new_selection is None:
-                    self.console.write("已取消切换。")
-                    continue
-                try:
-                    new_provider = create_provider(new_selection.config)
-                except ProviderConfigurationError as exc:
-                    self.console.write(f"配置错误：{exc}")
-                    continue
-                provider = new_provider
-                selection = new_selection
-                self._activate_selection(selection)
-                runner = AgentRunner(provider=provider, tools=self.tools, context_config=self.context_config)
-                self.console.write(
-                    f"已切换：{selection.preset.display_name} / "
-                    f"{selection.config.model}"
-                )
-                continue
-            if command == "/tools":
-                self.console.write("已注册工具：" + ", ".join(self.tools.tool_names))
-                continue
-            if user_text.startswith("/"):
-                self.console.write("未知命令，输入 /help 查看可用命令。")
-                continue
-
-            turn_messages = [*messages, {"role": "user", "content": user_text}]
-            renderer = (
-                StreamingAssistantRenderer(self.console)
-                if self.stream
-                else None
-            )
-            try:
-                # MockProvider 的响应序列是有限的（一次工具调用 + 一次最终
-                # 回答），每个用户回合都必须重新创建，否则第二个用户回合
-                # 会耗尽响应序列。真实 Provider 可以跨回合复用同一个实例。
-                turn_runner = runner
-                if selection.preset.protocol == "mock":
-                    turn_runner = AgentRunner(
-                        provider=create_provider(selection.config),
-                        tools=self.tools,
-                    )
-                result = await turn_runner.run(
-                    AgentRunSpec(
-                        initial_messages=turn_messages,
-                        max_iterations=self.max_iterations,
-                        on_text_delta=renderer.on_delta if renderer else None,
-                        on_tool_start=renderer.on_tool_start if renderer else None,
-                    )
-                )
-            except ProviderError as exc:
-                if renderer:
-                    renderer.finish()
-                self.console.write_error(f"Provider 错误：{exc}")
-                continue
-            except Exception as exc:  # noqa: BLE001 - CLI 需要兜底展示错误
-                if renderer:
-                    renderer.finish()
-                self.console.write_error(
-                    f"请求失败：{type(exc).__name__}: {exc}"
-                )
-                continue
-
-            if renderer:
-                renderer.finish()
-            answer = result.final_content
-            if answer is None:
-                answer = "（已达到最大迭代次数，未生成最终回答）"
-            elif not answer.strip():
-                # 某些供应商会返回空 content（例如只返回 reasoning 内容），
-                # 明确提示而不是打印一行只有角色标签的空消息。
-                answer = "（模型返回了空内容）"
-            if result.tools_used and not (renderer and renderer.tools_printed):
-                self.console.write_tool(", ".join(result.tools_used))
-            if not result.streamed_final:
-                self.console.write_assistant(answer)
-            messages = result.messages
 
 
 async def run_interactive_cli(

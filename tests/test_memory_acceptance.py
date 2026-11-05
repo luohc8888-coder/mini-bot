@@ -17,7 +17,6 @@ import pytest
 
 from mini_harness.agent import (
     ContextBuilder,
-    ContextCompactor,
     ContextConfig,
     ContextGovernor,
     IdleCompactionScheduler,

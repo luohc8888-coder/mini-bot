@@ -93,7 +93,7 @@ class OpenAICompatibleProvider(LLMProvider):
             provider_name: 错误信息中展示的厂商名称。
 
         上下游:
-            ProviderFactory 创建本对象，AgentRunner 每轮调用 ``chat``。
+            create_provider 创建本对象，AgentRunner 每轮调用 ``chat``。
         """
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
@@ -347,6 +347,11 @@ class OpenAICompatibleProvider(LLMProvider):
                 str(message["reasoning_content"])
                 if message.get("reasoning_content") is not None
                 else None
+            ),
+            usage=(
+                data.get("usage")
+                if isinstance(data.get("usage"), dict)
+                else {}
             ),
         )
 

@@ -251,7 +251,7 @@ def test_missing_tool_result_turn_is_dropped(tmp_path: Path) -> None:
 def test_history_budget_zero_still_sends_current_message(tmp_path: Path) -> None:
     """固定开销刚好占满预算时，仍可发送 system + 当前消息。"""
     workspace = make_workspace(tmp_path)
-    from mini_harness.agent.context import estimate_message_tokens
+    from mini_harness.agent.tokens import estimate_message_tokens
 
     probe = ContextBuilder(workspace)
     current = {"role": "user", "content": "hi"}
@@ -336,7 +336,7 @@ def test_stats_role_counts_and_drop_counts(tmp_path: Path) -> None:
 
 def test_estimate_tokens_counts_structure_overhead() -> None:
     """消息估算不仅计算 content，还计算角色、tool_calls 和结构开销。"""
-    from mini_harness.agent.context import estimate_message_tokens
+    from mini_harness.agent.tokens import estimate_message_tokens
 
     plain = {"role": "user", "content": "hello"}
     tool_message = {
