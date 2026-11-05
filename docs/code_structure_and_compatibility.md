@@ -53,6 +53,7 @@ mini-harness/
 │   │   ├── config.py
 │   │   ├── presets.py
 │   │   ├── factory.py
+│   │   ├── retry.py              # 重试策略、退避计算与统一重试循环
 │   │   ├── openai_compat.py
 │   │   ├── anthropic.py
 │   │   └── mock.py

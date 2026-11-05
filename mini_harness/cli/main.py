@@ -80,7 +80,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     mode.add_argument(
         "--interactive",
         action="store_true",
-        help="强制进入交互式 CLI",
+        help="兼容旧用法；不带参数运行 mini-bot 时默认进入交互式 CLI",
     )
     mode.add_argument(
         "--migrate-session", action="store_true",
@@ -193,8 +193,8 @@ def _positive_output_tokens(value: str) -> int:
 async def main(argv: Sequence[str] | None = None) -> None:
     """CLI 主入口。
 
-    无参数时：终端环境进入交互式 CLI，非交互环境（如测试/管道）运行
-    ``--demo``，避免自动化环境因为等待输入而挂起。
+    无参数时直接进入交互式 CLI，不依赖 stdin 是否为 TTY；需要一次性
+    离线演示时显式传入 ``--demo``。
     """
     args = parse_args([] if argv is None else argv)
 
@@ -225,29 +225,28 @@ async def main(argv: Sequence[str] | None = None) -> None:
             print("当前 Workspace 没有 Session，无需迁移。")
         return
 
-    if args.interactive or sys.stdin.isatty():
-        try:
-            await run_interactive_cli(
-                workspace=args.workspace,
-                max_iterations=args.max_iterations,
-                stream=args.stream,
-                max_context_tokens=args.max_context_tokens,
-                reserve_output_tokens=args.reserve_output_tokens,
-                max_output_tokens=args.max_output_tokens,
-                context_window_tokens=args.context_window_tokens,
-                thinking=args.thinking,
-                reasoning_effort=args.reasoning_effort,
-                idle_compact_after_minutes=args.idle_compact_after_minutes,
-                dream_interval_hours=args.dream_interval_hours,
-                no_dream=args.no_dream,
-            )
-        except WorkspaceError as exc:
-            print(f"Workspace 错误：{exc}", file=sys.stderr)
-        except ValueError as exc:
-            print(f"配置错误：{exc}", file=sys.stderr)
-        return
-
-    await run_demo()
+    # 默认行为就是进入交互式 CLI；`--interactive` 仅保留为显式兼容参数，
+    # `--demo` 才运行一次性离线演示。这样用户直接执行 `mini-bot` 即可进入
+    # CLI，不依赖 stdin 是否为 TTY（IDE、管道包装器也能正常进入）。
+    try:
+        await run_interactive_cli(
+            workspace=args.workspace,
+            max_iterations=args.max_iterations,
+            stream=args.stream,
+            max_context_tokens=args.max_context_tokens,
+            reserve_output_tokens=args.reserve_output_tokens,
+            max_output_tokens=args.max_output_tokens,
+            context_window_tokens=args.context_window_tokens,
+            thinking=args.thinking,
+            reasoning_effort=args.reasoning_effort,
+            idle_compact_after_minutes=args.idle_compact_after_minutes,
+            dream_interval_hours=args.dream_interval_hours,
+            no_dream=args.no_dream,
+        )
+    except WorkspaceError as exc:
+        print(f"Workspace 错误：{exc}", file=sys.stderr)
+    except ValueError as exc:
+        print(f"配置错误：{exc}", file=sys.stderr)
 
 
 def cli() -> None:

@@ -22,6 +22,7 @@ from .factory import (
 from .mock import MockProvider, ResponseFactory
 from .openai_compat import OpenAICompatibleProvider
 from .presets import PRESETS, ProviderPreset, get_preset, grouped_presets
+from .retry import RetryPolicy
 
 __all__ = [
     "AnthropicProvider",
@@ -36,6 +37,7 @@ __all__ = [
     "ProviderError",
     "ProviderPreset",
     "ResponseFactory",
+    "RetryPolicy",
     "TextDeltaCallback",
     "ToolCallRequest",
     "ToolDefinition",

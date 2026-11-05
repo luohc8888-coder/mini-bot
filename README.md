@@ -29,6 +29,7 @@ CLI → InboundMessage → MessageBus → AgentLoop
 - Idle Compaction（默认 15 分钟空闲、60 秒检查）与 `/compact` 手动压缩
 - Dream 长期记忆整理（默认每 2 小时检查、单次最多 20 条）与 `/dream` 手动整理，结构化操作 + 去重 + 原子写入
 - 大型 Tool Result 在 Provider 上下文中按 Token 截断并保留 path/offset/pattern 等元数据，Session 中的原始结果仍完整
+- 瞬时错误重试：429/5xx/网络故障按指数退避重试（默认 3 次尝试），优先采用服务端 Retry-After；流式响应一旦产生增量就不再重试，避免重复输出
 - `AgentRunResult.new_messages` 显式边界，避免 System Prompt 或裁剪后历史污染 Session
 - `/context` CLI 调试命令，展示真实 Token 预算与选择结果；`/last-prompt` 展示最后一次真实 Provider 请求快照
 - V1 的 Workspace、Session 持久化、多轮恢复、流式输出和全部 V0 能力保持不变
@@ -51,28 +52,28 @@ uv sync
 # 从任意目录安装并启动全局命令
 uv tool install --editable .
 
-# 进入交互式 CLI（推荐）
-mini-harness --interactive
+# 直接进入交互式 CLI（默认行为）
+mini-bot
 
 # 显式指定 Workspace
-mini-harness --interactive --workspace /path/to/project
+mini-bot --workspace /path/to/project
 
 # 分析较大项目时提高单次 Agent 的最大迭代次数
-mini-harness --interactive --workspace /path/to/project --max-iterations 50
+mini-bot --workspace /path/to/project --max-iterations 50
 
 # 按实际模型能力配置上下文预算；新 profile 会保存这些能力字段
-mini-harness --interactive --context-window-tokens 131072 --max-output-tokens 32768
+mini-bot --context-window-tokens 131072 --max-output-tokens 32768
 # 也可直接覆盖本次运行的输入窗口估算
-mini-harness --interactive --max-context-tokens 32768 --reserve-output-tokens 4096
+mini-bot --max-context-tokens 32768 --reserve-output-tokens 4096
 
 # 关闭流式输出，等待完整回答后一次性打印
-mini-harness --interactive --no-stream
+mini-bot --no-stream
 
 # 或运行完全离线的工具调用演示
-mini-harness --demo
+mini-bot --demo
 ```
 
-`mini-bot` 是等价的安装命令。安装后会同时提供 `mini-bot` 和 `mini-harness` 两个入口。
+安装后会同时提供 `mini-bot` 和 `mini-harness` 两个入口；两者不带参数时都直接进入交互式 CLI。
 
 也可以通过模块入口运行：
 
@@ -83,7 +84,7 @@ uv run python -m mini_harness --list-providers
 python -m mini_harness --interactive
 ```
 
-`mini-harness` / `mini-bot` 不带参数时：终端环境进入交互式 CLI；非交互环境（例如管道、CI）自动运行 `--demo`，避免等待输入。
+`mini-bot` / `mini-harness` 不带参数时直接进入交互式 CLI；自动化环境请显式使用 `--demo`（一次性离线演示）或其他非交互命令。
 
 ## V2 架构
 
@@ -409,7 +410,7 @@ Runner 会在连续只读、相同参数重复读取和临近迭代上限时加�
 例如，端点确认支持 1M 上下文、384K 输出和最高推理档位时：
 
 ```bash
-mini-bot --interactive --context-window-tokens 1048576 --max-output-tokens 393216 --thinking --reasoning-effort max
+mini-bot --context-window-tokens 1048576 --max-output-tokens 393216 --thinking --reasoning-effort max
 ```
 
 参数仅覆盖本次连接；要长期使用，可保存相应 profile 的 `context_window_tokens`、`max_output_tokens`、`thinking` 和 `reasoning_effort`。千问AI/DashScope 的思考开关使用 `enable_thinking=true`，DeepSeek 原生格式使用 `thinking={"type":"enabled"}`。不要把某个模型的额度直接用于其他模型或端点。
@@ -646,7 +647,7 @@ InteractiveCLI(stream=True)
 
 ```bash
 export DEEPSEEK_API_KEY="sk-..."
-mini-harness --interactive
+mini-bot
 ```
 
 华为云 MaaS 的 Base URL 以控制台提供的 OpenAI-compatible 地址为准，预设中不硬编码；CLI 会要求输入 Base URL，也可以预先设置 `HUAWEI_MAAS_BASE_URL` 或 `HUAWEI_MAAS_DIRECT_BASE_URL`。模型列表中已包含截图中的 `DeepSeek-v4.1-Flash`、`GLM-5.3`、`Qwen-300` 和 `deepseek-v4.1-flash-1017`。自定义 OpenAI-compatible 也可以用 `MINI_HARNESS_BASE_URL` 提供 Base URL。
@@ -769,6 +770,7 @@ mini-harness/
 │   │   └── profiles.py           # 命名配置持久化
 │   ├── providers/
 │   │   ├── base.py
+│   │   ├── retry.py              # 重试策略、退避计算与统一重试循环
 │   │   ├── config.py
 │   │   ├── presets.py
 │   │   ├── factory.py
@@ -796,7 +798,7 @@ uv run pytest -q
 最近一次完整回归结果（2026-11-05）：
 
 ```text
-438 passed
+451 passed
 ```
 
 测试覆盖：
@@ -810,7 +812,7 @@ uv run pytest -q
 | `tests/test_context_integration.py` | Session 完整历史保留、System Prompt 不落盘、AGENTS.md 每轮刷新、跨重启工具调用 ID、超预算保护、Runner 新增消息边界、`/context` |
 | `tests/test_runner.py` | MockProvider、消息历史、tool_call_id 配对、max_iterations、预算耗尽收尾、System Prompt 隔离、参数校验、工具异常 |
 | `tests/test_e2e.py` | 显式无状态 E2E 调用链、CLI 演示输出、Loop 正常退出与停止时序 |
-| `tests/test_providers.py` | 预设完整性、工厂构建、环境变量、OpenAI/Anthropic 请求响应转换、HTTP 错误 |
+| `tests/test_providers.py` | 预设完整性、工厂构建、环境变量、OpenAI/Anthropic 请求响应转换、HTTP 错误、瞬时错误重试与流式不重试规则 |
 | `tests/test_cli.py` / `tests/test_reasoning_settings.py` / `tests/test_output_tokens_config.py` | Profile 存储与权限、默认配置、输出额度校验与协议映射、多轮对话、模型切换、推理菜单保存/恢复/取消、实际请求参数更新与历史保留 |
 | `tests/test_workspace.py` | 稳定 workspace_id、不同路径隔离、`../`、绝对路径和符号链接越界检查 |
 | `tests/test_session_migration.py` | 显式 schema 迁移、备份冲突、写入失败恢复、严格加载与 CLI 退出码 |
@@ -868,6 +870,7 @@ uv run pytest -q
 - 没有 Hooks、通用 Checkpoint、MCP、多通道和运行中消息注入。
 - 文本读取仍只支持 UTF-8，不解析图片、PDF 或 Office；本地 shell 命令通过独立 `run_command` 提供。
 - 路径检查不是完整安全沙箱，符号链接竞态和并发文件系统修改是后续强化项。
+- 重试只覆盖网络传输错误、429 和服务端 5xx；鉴权/参数错误立即失败，流式响应在产生增量后不再重试。
 - 没有 SQLite；JSON 存储不适合大规模或高并发使用。
 
 ## 后续建议（V3，不在本次实现）

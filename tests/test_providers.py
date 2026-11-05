@@ -19,6 +19,11 @@ from mini_harness.providers import (
     grouped_presets,
 )
 from mini_harness.providers.presets import PRESETS
+from mini_harness.providers.retry import (
+    RetryPolicy,
+    parse_retry_after,
+    retry_delay_seconds,
+)
 from mini_harness.tools import AddTool, ToolRegistry
 
 
@@ -577,3 +582,265 @@ async def test_anthropic_provider_preserves_usage() -> None:
     response = await provider.chat([{"role": "user", "content": "hi"}])
     assert response.usage["input_tokens"] == 9
     assert response.usage["output_tokens"] == 2
+def test_retry_policy_validates_attempts_and_delays() -> None:
+    """重试策略拒绝会让循环失去意义的参数。"""
+    policy = RetryPolicy()
+    assert policy.max_attempts == 3
+    assert 429 in policy.retry_status_codes
+    assert 401 not in policy.retry_status_codes
+
+    with pytest.raises(ValueError, match="max_attempts"):
+        RetryPolicy(max_attempts=0)
+    with pytest.raises(ValueError, match="base_delay"):
+        RetryPolicy(base_delay=-1)
+    with pytest.raises(ValueError, match="max_delay"):
+        RetryPolicy(base_delay=2.0, max_delay=1.0)
+
+
+def test_retry_delay_grows_exponentially_and_stops_at_cap() -> None:
+    """没有 Retry-After 时按 2 的幂退避，抖动限制在 50%~100%。"""
+    policy = RetryPolicy(base_delay=1.0, max_delay=4.0)
+
+    assert retry_delay_seconds(0, policy, rand=lambda: 1.0) == 1.0
+    assert retry_delay_seconds(1, policy, rand=lambda: 1.0) == 2.0
+    assert retry_delay_seconds(2, policy, rand=lambda: 1.0) == 4.0
+    # 超过上限后不再增长。
+    assert retry_delay_seconds(5, policy, rand=lambda: 1.0) == 4.0
+    # 抖动只会落在上限的一半到上限之间。
+    assert retry_delay_seconds(1, policy, rand=lambda: 0.0) == 1.0
+
+
+def test_retry_delay_prefers_retry_after_within_cap() -> None:
+    """服务端 Retry-After 优先，并被 max_delay 截断。"""
+    policy = RetryPolicy(base_delay=1.0, max_delay=5.0)
+    assert retry_delay_seconds(0, policy, retry_after=2.5) == 2.5
+    assert retry_delay_seconds(0, policy, retry_after=30.0) == 5.0
+    assert retry_delay_seconds(0, policy, retry_after=0.0) == 0.0
+
+
+def test_parse_retry_after_accepts_seconds_only() -> None:
+    """Retry-After 的 HTTP 日期形式交给指数退避处理。"""
+    assert parse_retry_after("3") == 3.0
+    assert parse_retry_after(" 1.5 ") == 1.5
+    assert parse_retry_after(None) is None
+    assert parse_retry_after("") is None
+    assert parse_retry_after("Wed, 21 Oct 2015 07:28:00 GMT") is None
+    assert parse_retry_after("-1") is None
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_retries_transient_status_then_succeeds() -> None:
+    """503 属于瞬时故障，重试成功后调用方不应看到错误。"""
+    attempts: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts.append(1)
+        if len(attempts) == 1:
+            return httpx.Response(503, json={"error": {"message": "overloaded"}})
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "恢复"},
+                        "finish_reason": "stop",
+                    }
+                ]
+            },
+        )
+
+    provider = OpenAICompatibleProvider(
+        api_key="sk-test",
+        base_url="https://example.com/v1",
+        model="test-model",
+        transport=httpx.MockTransport(handler),
+        retry_policy=RetryPolicy(base_delay=0.0, max_delay=0.0),
+    )
+    response = await provider.chat([{"role": "user", "content": "hi"}])
+    assert response.content == "恢复"
+    assert len(attempts) == 2
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_gives_up_after_max_attempts() -> None:
+    """持续 503 时用尽尝试次数，并把重试信息写进错误。"""
+    attempts: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts.append(1)
+        return httpx.Response(503, json={"error": {"message": "overloaded"}})
+
+    provider = OpenAICompatibleProvider(
+        api_key="sk-test",
+        base_url="https://example.com/v1",
+        model="test-model",
+        transport=httpx.MockTransport(handler),
+        retry_policy=RetryPolicy(max_attempts=3, base_delay=0.0, max_delay=0.0),
+    )
+    with pytest.raises(ProviderError) as exc_info:
+        await provider.chat([{"role": "user", "content": "hi"}])
+
+    message = str(exc_info.value)
+    assert "HTTP 503" in message
+    assert "已尝试 3 次" in message
+    assert len(attempts) == 3
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_does_not_retry_auth_failure() -> None:
+    """鉴权失败重试也没有意义，应只请求一次后立即报错。"""
+    attempts: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts.append(1)
+        return httpx.Response(401, json={"error": {"message": "invalid api key"}})
+
+    provider = OpenAICompatibleProvider(
+        api_key="bad",
+        base_url="https://example.com/v1",
+        model="test-model",
+        transport=httpx.MockTransport(handler),
+        retry_policy=RetryPolicy(base_delay=0.0, max_delay=0.0),
+    )
+    with pytest.raises(ProviderError, match="HTTP 401"):
+        await provider.chat([{"role": "user", "content": "hi"}])
+    assert len(attempts) == 1
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_retries_network_error() -> None:
+    """连接错误同样属于瞬时故障，应在后续尝试中恢复。"""
+    attempts: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise httpx.ConnectError("connection reset", request=request)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "OK"},
+                        "finish_reason": "stop",
+                    }
+                ]
+            },
+        )
+
+    provider = OpenAICompatibleProvider(
+        api_key="sk-test",
+        base_url="https://example.com/v1",
+        model="test-model",
+        transport=httpx.MockTransport(handler),
+        retry_policy=RetryPolicy(base_delay=0.0, max_delay=0.0),
+    )
+    response = await provider.chat([{"role": "user", "content": "hi"}])
+    assert response.content == "OK"
+    assert len(attempts) == 2
+
+
+@pytest.mark.asyncio
+async def test_anthropic_provider_retries_rate_limit() -> None:
+    """Anthropic 适配器共享同一套重试语义。"""
+    attempts: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts.append(1)
+        if len(attempts) == 1:
+            return httpx.Response(
+                429,
+                headers={"retry-after": "2"},
+                json={"error": {"message": "rate limited"}},
+            )
+        return httpx.Response(
+            200,
+            json={
+                "content": [{"type": "text", "text": "OK"}],
+                "stop_reason": "end_turn",
+            },
+        )
+
+    provider = AnthropicProvider(
+        api_key="sk-ant",
+        base_url="https://api.anthropic.com/v1",
+        model="claude-test",
+        transport=httpx.MockTransport(handler),
+        retry_policy=RetryPolicy(base_delay=0.0, max_delay=0.0),
+    )
+    response = await provider.chat([{"role": "user", "content": "hi"}])
+    assert response.content == "OK"
+    assert len(attempts) == 2
+
+
+@pytest.mark.asyncio
+async def test_openai_stream_retries_before_first_delta() -> None:
+    """流式请求在还没输出任何文本时，可以安全整体重试。"""
+    attempts: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts.append(1)
+        if len(attempts) == 1:
+            return httpx.Response(502, json={"error": {"message": "bad gateway"}})
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=(
+                'data: {"choices":[{"delta":{"content":"OK"},'
+                '"finish_reason":"stop"}]}\n\n'
+                "data: [DONE]\n\n"
+            ).encode(),
+        )
+
+    provider = OpenAICompatibleProvider(
+        api_key="sk-test",
+        base_url="https://example.com/v1",
+        model="test-model",
+        transport=httpx.MockTransport(handler),
+        retry_policy=RetryPolicy(base_delay=0.0, max_delay=0.0),
+    )
+    deltas: list[str] = []
+    response = await provider.chat_stream(
+        [{"role": "user", "content": "hi"}],
+        on_text_delta=deltas.append,
+    )
+    assert deltas == ["OK"]
+    assert response.content == "OK"
+    assert len(attempts) == 2
+
+
+@pytest.mark.asyncio
+async def test_openai_stream_does_not_retry_after_partial_output() -> None:
+    """一旦回调过文本，中途断线只能报错，否则用户会看到重复内容。"""
+    attempts: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts.append(1)
+        return httpx.Response(200, stream=_BrokenSSEStream())
+
+    provider = OpenAICompatibleProvider(
+        api_key="sk-test",
+        base_url="https://example.com/v1",
+        model="test-model",
+        transport=httpx.MockTransport(handler),
+        retry_policy=RetryPolicy(base_delay=0.0, max_delay=0.0),
+    )
+    deltas: list[str] = []
+    with pytest.raises(ProviderError, match="网络请求失败"):
+        await provider.chat_stream(
+            [{"role": "user", "content": "hi"}],
+            on_text_delta=deltas.append,
+        )
+    assert deltas == ["你"]
+    assert len(attempts) == 1
+
+
+class _BrokenSSEStream(httpx.AsyncByteStream):
+    """先推送一段文本 delta，再模拟连接中断的 SSE 流。"""
+
+    async def __aiter__(self):  # type: ignore[no-untyped-def]
+        yield b'data: {"choices":[{"delta":{"content":"\\u4f60"}}]}\n\n'
+        raise httpx.ReadError("connection dropped")
+
+    async def aclose(self) -> None:
+        return None

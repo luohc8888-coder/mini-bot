@@ -21,6 +21,12 @@ from .base import (
     ToolCallRequest,
     ToolDefinition,
 )
+from .retry import (
+    RetryPolicy,
+    RetryableStatusError,
+    response_retry_after,
+    with_retries,
+)
 
 
 class AnthropicProvider(LLMProvider):
@@ -41,6 +47,7 @@ class AnthropicProvider(LLMProvider):
         context_window_tokens: int = 0,
         thinking: bool = False,
         reasoning_effort: str = "",
+        retry_policy: RetryPolicy | None = None,
     ) -> None:
         """保存 Anthropic 连接参数。
 
@@ -54,6 +61,7 @@ class AnthropicProvider(LLMProvider):
             extra_headers: 额外 HTTP 头。
             transport: 测试用 httpx transport。
             provider_name: 错误信息中展示的名称。
+            retry_policy: 瞬时错误的重试策略；None 使用默认 3 次尝试。
 
         上下游:
             create_provider 创建本对象，AgentRunner 调用 ``chat``。
@@ -71,6 +79,7 @@ class AnthropicProvider(LLMProvider):
         self.context_window_tokens = context_window_tokens
         self.thinking = thinking
         self.reasoning_effort = reasoning_effort
+        self.retry_policy = retry_policy if retry_policy is not None else RetryPolicy()
 
     @property
     def messages_url(self) -> str:
@@ -243,19 +252,30 @@ class AnthropicProvider(LLMProvider):
                 timeout=self.timeout,
                 transport=self.transport,
             ) as client:
-                response = await client.post(
-                    self.messages_url,
-                    headers=self._headers(),
-                    json=payload,
+
+                async def send() -> httpx.Response:
+                    """发送一次请求；可重试状态码交给 with_retries 处理。"""
+                    response = await client.post(
+                        self.messages_url,
+                        headers=self._headers(),
+                        json=payload,
+                    )
+                    if response.status_code in self.retry_policy.retry_status_codes:
+                        raise RetryableStatusError(
+                            self._format_http_error(response),
+                            response_retry_after(response),
+                        )
+                    return response
+
+                response = await with_retries(
+                    send,
+                    policy=self.retry_policy,
+                    provider_name=self.provider_name,
                 )
         except ImportError as exc:
             raise ProviderError(
                 "无法初始化 HTTP 客户端，可能是 SOCKS 代理依赖缺失。"
                 "请运行 `uv sync`，或安装 `httpx[socks]` 后重试。"
-            ) from exc
-        except httpx.RequestError as exc:
-            raise ProviderError(
-                f"{self.provider_name} 网络请求失败：{exc}"
             ) from exc
 
         if response.status_code >= 400:
@@ -327,8 +347,11 @@ class AnthropicProvider(LLMProvider):
         text_parts: list[str] = []
         tool_buffers: dict[int, dict[str, Any]] = {}
         finish_reason = "stop"
+        progressed = False
 
-        try:
+        async def stream_once() -> None:
+            """读取一次完整 SSE；未产生输出前的失败允许整体重试。"""
+            nonlocal finish_reason, progressed
             async with httpx.AsyncClient(
                 timeout=self.timeout,
                 transport=self.transport,
@@ -341,6 +364,11 @@ class AnthropicProvider(LLMProvider):
                 ) as response:
                     if response.status_code >= 400:
                         await response.aread()
+                        if response.status_code in self.retry_policy.retry_status_codes:
+                            raise RetryableStatusError(
+                                self._format_http_error(response),
+                                response_retry_after(response),
+                            )
                         raise ProviderError(self._format_http_error(response))
 
                     async for line in response.aiter_lines():
@@ -368,9 +396,11 @@ class AnthropicProvider(LLMProvider):
                             if block.get("type") == "text":
                                 initial = str(block.get("text", ""))
                                 if initial:
+                                    progressed = True
                                     text_parts.append(initial)
                                     on_text_delta(initial)
                             elif block.get("type") == "tool_use":
+                                progressed = True
                                 tool_buffers[index] = {
                                     "id": str(block.get("id", "")),
                                     "name": str(block.get("name", "")),
@@ -387,9 +417,11 @@ class AnthropicProvider(LLMProvider):
                             if delta.get("type") == "text_delta":
                                 text = str(delta.get("text", ""))
                                 if text:
+                                    progressed = True
                                     text_parts.append(text)
                                     on_text_delta(text)
                             elif delta.get("type") == "input_json_delta":
+                                progressed = True
                                 buffer = tool_buffers.setdefault(
                                     index,
                                     {"id": "", "name": "", "arguments": ""},
@@ -403,14 +435,18 @@ class AnthropicProvider(LLMProvider):
                                 finish_reason = str(
                                     delta.get("stop_reason") or finish_reason
                                 )
+
+        try:
+            await with_retries(
+                stream_once,
+                policy=self.retry_policy,
+                provider_name=self.provider_name,
+                has_progressed=lambda: progressed,
+            )
         except ImportError as exc:
             raise ProviderError(
                 "无法初始化 HTTP 客户端，可能是 SOCKS 代理依赖缺失。"
                 "请运行 `uv sync`，或安装 `httpx[socks]` 后重试。"
-            ) from exc
-        except httpx.RequestError as exc:
-            raise ProviderError(
-                f"{self.provider_name} 网络请求失败：{exc}"
             ) from exc
 
         tool_calls = [

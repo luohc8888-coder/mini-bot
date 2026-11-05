@@ -22,6 +22,12 @@ from .base import (
     ToolCallRequest,
     ToolDefinition,
 )
+from .retry import (
+    RetryPolicy,
+    RetryableStatusError,
+    response_retry_after,
+    with_retries,
+)
 
 
 def _normalize_content(content: Any) -> str | None:
@@ -78,6 +84,7 @@ class OpenAICompatibleProvider(LLMProvider):
         context_window_tokens: int = 0,
         thinking: bool = False,
         reasoning_effort: str = "",
+        retry_policy: RetryPolicy | None = None,
     ) -> None:
         """保存连接参数。
 
@@ -91,6 +98,7 @@ class OpenAICompatibleProvider(LLMProvider):
             extra_headers: 额外 HTTP 头。
             transport: 测试用 httpx transport；生产环境保持 None。
             provider_name: 错误信息中展示的厂商名称。
+            retry_policy: 瞬时错误的重试策略；None 使用默认 3 次尝试。
 
         上下游:
             create_provider 创建本对象，AgentRunner 每轮调用 ``chat``。
@@ -108,6 +116,7 @@ class OpenAICompatibleProvider(LLMProvider):
         self.context_window_tokens = context_window_tokens
         self.thinking = thinking
         self.reasoning_effort = reasoning_effort
+        self.retry_policy = retry_policy if retry_policy is not None else RetryPolicy()
 
     @property
     def chat_url(self) -> str:
@@ -292,19 +301,30 @@ class OpenAICompatibleProvider(LLMProvider):
                 timeout=self.timeout,
                 transport=self.transport,
             ) as client:
-                response = await client.post(
-                    self.chat_url,
-                    headers=self._headers(),
-                    json=payload,
+
+                async def send() -> httpx.Response:
+                    """发送一次请求；可重试状态码交给 with_retries 处理。"""
+                    response = await client.post(
+                        self.chat_url,
+                        headers=self._headers(),
+                        json=payload,
+                    )
+                    if response.status_code in self.retry_policy.retry_status_codes:
+                        raise RetryableStatusError(
+                            self._format_http_error(response),
+                            response_retry_after(response),
+                        )
+                    return response
+
+                response = await with_retries(
+                    send,
+                    policy=self.retry_policy,
+                    provider_name=self.provider_name,
                 )
         except ImportError as exc:
             raise ProviderError(
                 "无法初始化 HTTP 客户端，可能是 SOCKS 代理依赖缺失。"
                 "请运行 `uv sync`，或安装 `httpx[socks]` 后重试。"
-            ) from exc
-        except httpx.RequestError as exc:
-            raise ProviderError(
-                f"{self.provider_name} 网络请求失败：{exc}"
             ) from exc
 
         self._raise_for_status(response)
@@ -375,8 +395,11 @@ class OpenAICompatibleProvider(LLMProvider):
         reasoning_parts: list[str] = []
         tool_buffers: dict[int, dict[str, str]] = {}
         finish_reason = "stop"
+        progressed = False
 
-        try:
+        async def stream_once() -> None:
+            """读取一次完整 SSE；未产生输出前的失败允许整体重试。"""
+            nonlocal finish_reason, progressed
             async with httpx.AsyncClient(
                 timeout=self.timeout,
                 transport=self.transport,
@@ -389,6 +412,11 @@ class OpenAICompatibleProvider(LLMProvider):
                 ) as response:
                     if response.status_code >= 400:
                         await response.aread()
+                        if response.status_code in self.retry_policy.retry_status_codes:
+                            raise RetryableStatusError(
+                                self._format_http_error(response),
+                                response_retry_after(response),
+                            )
                         self._raise_for_status(response)
 
                     async for line in response.aiter_lines():
@@ -421,13 +449,18 @@ class OpenAICompatibleProvider(LLMProvider):
 
                         text = _normalize_content(delta.get("content"))
                         if text:
+                            progressed = True
                             content_parts.append(text)
                             on_text_delta(text)
                         reasoning = delta.get("reasoning_content")
                         if isinstance(reasoning, str) and reasoning:
+                            progressed = True
                             reasoning_parts.append(reasoning)
 
-                        for raw_call in delta.get("tool_calls") or []:
+                        raw_calls = delta.get("tool_calls") or []
+                        if raw_calls:
+                            progressed = True
+                        for raw_call in raw_calls:
                             if not isinstance(raw_call, dict):
                                 continue
                             try:
@@ -454,14 +487,18 @@ class OpenAICompatibleProvider(LLMProvider):
                                 buffer["arguments"] += json.dumps(
                                     arguments, ensure_ascii=False
                                 )
+
+        try:
+            await with_retries(
+                stream_once,
+                policy=self.retry_policy,
+                provider_name=self.provider_name,
+                has_progressed=lambda: progressed,
+            )
         except ImportError as exc:
             raise ProviderError(
                 "无法初始化 HTTP 客户端，可能是 SOCKS 代理依赖缺失。"
                 "请运行 `uv sync`，或安装 `httpx[socks]` 后重试。"
-            ) from exc
-        except httpx.RequestError as exc:
-            raise ProviderError(
-                f"{self.provider_name} 网络请求失败：{exc}"
             ) from exc
 
         return LLMResponse(
