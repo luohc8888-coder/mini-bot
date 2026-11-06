@@ -70,6 +70,7 @@ def test_architecture_api_generates_and_serves_cache(tmp_path: Path) -> None:
         assert status.status_code == 200
         assert status.json()["configured"] is True
         assert status.json()["available"] is False
+        assert status.json()["cacheStatus"] == "missing"
 
         missing = client.get("/api/architecture")
         assert missing.status_code == 404
@@ -84,6 +85,10 @@ def test_architecture_api_generates_and_serves_cache(tmp_path: Path) -> None:
         cached = client.get("/api/architecture")
         assert cached.status_code == 200
         assert cached.json()["mock"] is False
+
+        valid_status = client.get("/api/architecture/status").json()
+        assert valid_status["available"] is True
+        assert valid_status["cacheStatus"] == "valid"
 
         again = client.post("/api/architecture/analyze")
         assert again.status_code == 200
@@ -106,3 +111,41 @@ def test_architecture_api_without_provider_reports_not_configured(tmp_path: Path
         response = client.post("/api/architecture/analyze")
         assert response.status_code == 503
         assert "没有默认 Provider" in response.json()["detail"]
+
+
+def test_architecture_api_reports_stale_cache_and_can_serve_it_explicitly(
+    tmp_path: Path,
+) -> None:
+    root, frontend = _project(tmp_path)
+    payload = _architecture_payload(root)
+    provider = MockProvider(
+        [LLMResponse(content=json.dumps(payload, ensure_ascii=False))]
+    )
+    cache = ArchitectureCache(tmp_path / "cache.json")
+    first_app = create_app(
+        root,
+        frontend_dir=frontend,
+        architecture_provider=provider,
+        architecture_cache=cache,
+    )
+
+    with TestClient(first_app) as client:
+        assert client.post("/api/architecture/analyze").status_code == 200
+
+    (root / "main.py").write_text(
+        "def main() -> None:\n    pass\n\n\ndef another() -> None:\n    pass\n",
+        encoding="utf-8",
+    )
+    second_app = create_app(root, frontend_dir=frontend, architecture_cache=cache)
+
+    with TestClient(second_app) as client:
+        status = client.get("/api/architecture/status").json()
+        assert status["configured"] is False
+        assert status["available"] is False
+        assert status["cacheStatus"] == "stale"
+        assert status["cacheGeneratedAt"]
+
+        assert client.get("/api/architecture").status_code == 404
+        stale = client.get("/api/architecture?allow_stale=true")
+        assert stale.status_code == 200
+        assert stale.json()["mock"] is False

@@ -9,7 +9,10 @@ export interface ArchitectureStatus {
   provider: string;
   model: string;
   available: boolean;
+  cacheStatus?: "valid" | "stale" | "missing";
   generatedAt: string | null;
+  cacheGeneratedAt?: string | null;
+  cacheStoredFingerprint?: string | null;
   cachePath: string;
   error: string | null;
 }
@@ -93,8 +96,11 @@ export function fetchArchitectureStatus(): Promise<ArchitectureStatus> {
   return requestJson<ArchitectureStatus>("/api/architecture/status");
 }
 
-export function fetchArchitectureGraph(): Promise<ArchitectureGraph> {
-  return requestJson<ArchitectureGraph>("/api/architecture");
+export function fetchArchitectureGraph(
+  allowStale = false,
+): Promise<ArchitectureGraph> {
+  const query = allowStale ? "?allow_stale=true" : "";
+  return requestJson<ArchitectureGraph>(`/api/architecture${query}`);
 }
 
 export function fetchSourceSnippet(

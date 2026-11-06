@@ -120,8 +120,8 @@ mini-bot web --workspace /path/to/project --port 8765
 - `GET /api/node?node_id=...`：单个节点及其直接关系
 - `GET /api/source?symbol_id=...`：按符号 ID 读取只读源码片段（受 Workspace 边界、文件大小和行数限制）
 - `GET /api/children?parent_id=...`：某一层级的直接子节点
-- `GET /api/architecture/status`：LLM Provider 与架构缓存状态（不含 API Key）
-- `GET /api/architecture`：读取当前源码指纹对应的 ArchitectureGraph
+- `GET /api/architecture/status`：LLM Provider 与架构缓存状态（不含 API Key；`cacheStatus` 为 `valid` / `stale` / `missing`）
+- `GET /api/architecture`：读取当前源码指纹对应的 ArchitectureGraph；`?allow_stale=true` 可显式读取旧缓存
 - `POST /api/architecture/analyze?force=false`：调用 LLM 生成并校验运行架构
 
 正式运行时不需要单独启动 Vite；FastAPI 的 `/` 提供构建后的 React 前端。只有修改前端源码时才需要：
@@ -161,7 +161,7 @@ analysis_input = ArchitectureInputBuilder(index, graph).build()
 
 Phase 4.3 在 Phase 4.2 的结构化输入之上接入真实 LLM：`ArchitectureAnalyzer` 构造受 Token 预算约束的 Prompt，调用现有 `LLMProvider`，解析模型返回的 JSON，并通过 `ArchitectureGraphValidator` + `SymbolIndex` 校验所有源码引用。无法确认的关系保留为 `inferred`；LLM 不直接读取整个项目，也不输出 Mermaid。
 
-Web 服务默认从 CLI 保存的默认 Provider profile 读取配置。启动后访问「运行架构」页，首次会生成并缓存 ArchitectureGraph；再次打开会直接复用同源码指纹的缓存：
+Web 服务默认从 CLI 保存的默认 Provider profile 读取配置。启动后访问「运行架构」页，首次需要点击「生成运行架构」才会调用 LLM；之后同源码指纹会直接复用缓存。缓存失效时页面会显示「架构缓存已过期」，不会自动调用 LLM；用户可以显式选择「使用旧缓存」或「重新分析」。
 
 ```bash
 # 使用默认 profile 启动
@@ -174,7 +174,7 @@ mini-bot web --workspace /path/to/project --architecture-profile Qwen-token
 uv run python -m mini_harness.architecture --workspace . --analyze --profile Qwen-token
 ```
 
-缓存路径默认是 `~/.mini-harness/architecture/<workspace_id>/architecture.json`，可用 `MINI_HARNESS_ARCHITECTURE_HOME` 改变根目录。缓存以 CodeGraph 内容的 SHA-256 作为失效键；源码变化后会自动重新分析。没有配置 Provider 时，代码结构浏览仍可用，运行架构接口会返回明确的未配置错误。
+缓存路径默认是 `~/.mini-harness/architecture/<workspace_id>/architecture.json`，可用 `MINI_HARNESS_ARCHITECTURE_HOME` 改变根目录。缓存以 CodeGraph 内容的 SHA-256 作为失效键；源码变化后缓存会标记为 stale，但不会自动调用 LLM，需要用户在页面上显式选择旧缓存或重新分析。没有配置 Provider 时，代码结构浏览仍可用，运行架构接口会返回明确的未配置错误。
 
 Python 调用方式：
 

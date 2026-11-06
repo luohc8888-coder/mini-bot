@@ -6,7 +6,6 @@ import { RuntimeCanvas } from "../components/RuntimeCanvas";
 import { RuntimeInspector } from "../components/RuntimeInspector";
 import { SourcePreviewDrawer } from "../components/SourcePreviewDrawer";
 import {
-  ArchitectureApiError,
   architectureErrorMessage,
   fetchArchitectureGraph,
   fetchArchitectureStatus,
@@ -79,6 +78,7 @@ export function ArchitectureExplorer({
   const [analysisSource, setAnalysisSource] = useState<AnalysisSource | null>(
     null,
   );
+  const [staleCache, setStaleCache] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const startedRef = useRef(false);
 
@@ -102,13 +102,16 @@ export function ArchitectureExplorer({
         const result = await generateArchitecture(force);
         applyGraph(result.graph);
         setAnalysisSource(result.cached ? "cache" : "generated");
+        setStaleCache(false);
+        const generatedAt = new Date().toISOString();
         setStatus((current) =>
           current
             ? {
                 ...current,
                 available: true,
-                generatedAt:
-                  current.generatedAt ?? new Date().toISOString(),
+                cacheStatus: "valid",
+                generatedAt,
+                cacheGeneratedAt: generatedAt,
               }
             : current,
         );
@@ -121,6 +124,21 @@ export function ArchitectureExplorer({
     },
     [applyGraph],
   );
+
+  const loadStaleCache = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const staleGraph = await fetchArchitectureGraph(true);
+      applyGraph(staleGraph);
+      setAnalysisSource("cache");
+      setStaleCache(true);
+    } catch (err) {
+      setError(architectureErrorMessage(err));
+    } finally {
+      setLoading(false);
+    }
+  }, [applyGraph]);
 
   useEffect(() => {
     if (startedRef.current) {
@@ -139,36 +157,25 @@ export function ArchitectureExplorer({
         }
         setStatus(nextStatus);
 
+        const cacheStatus =
+          nextStatus.cacheStatus ??
+          (nextStatus.available ? "valid" : "missing");
+        if (cacheStatus !== "valid") {
+          return;
+        }
+
         try {
           const cachedGraph = await fetchArchitectureGraph();
           if (!cancelled) {
             applyGraph(cachedGraph);
             setAnalysisSource("cache");
+            setStaleCache(false);
           }
         } catch (loadError) {
           if (cancelled) {
             return;
           }
-          if (
-            loadError instanceof ArchitectureApiError &&
-            loadError.status === 404
-          ) {
-            if (!nextStatus.configured) {
-              setError(
-                nextStatus.error ??
-                  "尚未配置 LLM Provider，暂时无法生成运行架构。",
-              );
-              return;
-            }
-            setAnalyzing(true);
-            const result = await generateArchitecture(false);
-            if (!cancelled) {
-              applyGraph(result.graph);
-              setAnalysisSource(result.cached ? "cache" : "generated");
-            }
-          } else {
-            throw loadError;
-          }
+          setError(architectureErrorMessage(loadError));
         }
       } catch (loadError) {
         if (!cancelled) {
@@ -353,7 +360,13 @@ export function ArchitectureExplorer({
                   (analyzing ? "AI 分析中" : "运行架构")}
               </span>
               <span className="view-context__kind">
-                {graph?.mock ? "Mock" : graph ? "LLM 架构" : "等待生成"}
+                {graph?.mock
+                  ? "Mock"
+                  : graph
+                    ? "LLM 架构"
+                    : status?.cacheStatus === "stale"
+                      ? "缓存已过期"
+                      : "等待生成"}
               </span>
             </div>
             {currentView ? (
@@ -450,6 +463,15 @@ export function ArchitectureExplorer({
               </span>
             </div>
 
+            {staleCache ? (
+              <div className="runtime-cache-banner" role="status">
+                <span className="runtime-cache-banner__title">旧缓存</span>
+                <span className="runtime-cache-banner__copy">
+                  源码指纹已变化，当前展示旧架构；需要最新结构请重新生成。
+                </span>
+              </div>
+            ) : null}
+
             {error ? (
               <div className="architecture-error" role="alert">
                 <div>
@@ -544,6 +566,11 @@ export function ArchitectureExplorer({
                 status={status}
                 error={error}
                 onGenerate={() => void runGeneration(false)}
+                onUseStale={
+                  status?.cacheStatus === "stale"
+                    ? () => void loadStaleCache()
+                    : undefined
+                }
               />
             )}
           </div>
@@ -599,7 +626,15 @@ export function ArchitectureExplorer({
           <span className="status-bar__divider">/</span>
           <span>{status?.provider || "Provider 未配置"}</span>
           <span className="status-bar__divider">/</span>
-          <span>{analysisSource === "cache" ? "缓存结果" : graph ? "本次生成" : "无 LLM 调用"}</span>
+          <span>
+            {staleCache
+              ? "旧缓存"
+              : analysisSource === "cache"
+                ? "缓存结果"
+                : graph
+                  ? "本次生成"
+                  : "无 LLM 调用"}
+          </span>
         </span>
       </footer>
     </div>
@@ -612,6 +647,7 @@ interface ArchitectureEmptyStateProps {
   status: ArchitectureStatus | null;
   error: string | null;
   onGenerate: () => void;
+  onUseStale?: () => void;
 }
 
 function ArchitectureEmptyState({
@@ -620,9 +656,12 @@ function ArchitectureEmptyState({
   status,
   error,
   onGenerate,
+  onUseStale,
 }: ArchitectureEmptyStateProps) {
   const busy = loading || analyzing;
   const canGenerate = Boolean(status?.configured) && !busy;
+  const stale = status?.cacheStatus === "stale";
+  const canUseStale = Boolean(onUseStale) && !busy;
   return (
     <div className="architecture-empty">
       <span className="architecture-empty__mark" aria-hidden="true">
@@ -633,17 +672,26 @@ function ArchitectureEmptyState({
           ? "正在分析项目架构"
           : loading
             ? "正在加载运行架构"
-            : "还没有生成运行架构"}
+            : stale
+              ? "架构缓存已过期"
+              : "还没有生成运行架构"}
       </h3>
       <p>
         {analyzing
           ? "LLM 正在读取有界的项目索引、关键符号和源码窗口；所有源码引用都会经过 SymbolIndex 校验。"
           : loading
             ? "正在检查本地缓存与 Provider 状态。"
-            : status?.configured
-              ? "点击下方按钮，让 LLM 基于 AST/CodeGraph 生成可交互的语义架构图。"
-              : "运行架构需要先在 mini-bot 中配置 LLM Provider。代码结构浏览不依赖 LLM。"}
+            : stale
+              ? "检测到项目源码发生变化，上次生成的架构缓存已失效。可以继续查看旧缓存，或重新分析项目。"
+              : status?.configured
+                ? "点击下方按钮，让 LLM 基于 AST/CodeGraph 生成可交互的语义架构图。"
+                : "运行架构需要先在 mini-bot 中配置 LLM Provider。代码结构浏览不依赖 LLM。"}
       </p>
+      {stale && status?.cacheGeneratedAt ? (
+        <div className="architecture-empty__hint">
+          上次缓存生成时间：{status.cacheGeneratedAt}
+        </div>
+      ) : null}
       {status && !status.configured ? (
         <div className="architecture-empty__hint">
           {status.error ?? "请先运行 mini-bot 完成 Provider 配置。"}
@@ -654,6 +702,25 @@ function ArchitectureEmptyState({
         <div className="architecture-progress">
           <span />
           正在工作…
+        </div>
+      ) : stale ? (
+        <div className="architecture-empty__actions">
+          <button
+            type="button"
+            className="ghost-button architecture-empty__action"
+            onClick={onUseStale}
+            disabled={!canUseStale}
+          >
+            使用旧缓存
+          </button>
+          <button
+            type="button"
+            className="primary-button architecture-empty__action"
+            onClick={onGenerate}
+            disabled={!canGenerate}
+          >
+            重新分析
+          </button>
         </div>
       ) : (
         <button
@@ -717,7 +784,13 @@ function ArchitectureEmptyInspector({
         </div>
         <div className="meta-grid__item meta-grid__item--wide">
           <span>缓存状态</span>
-          <strong>{status?.available ? "已有缓存" : "尚未生成"}</strong>
+          <strong>
+            {status?.cacheStatus === "valid"
+              ? "有效缓存"
+              : status?.cacheStatus === "stale"
+                ? "缓存已过期"
+                : "尚未生成"}
+          </strong>
         </div>
       </div>
       <section className="panel-section">

@@ -45,9 +45,24 @@ class ArchitectureService:
     def configured(self) -> bool:
         return self.analyzer is not None
 
-    def cached_result(self) -> ArchitectureAnalysisResult | None:
-        """读取与当前 CodeGraph 指纹匹配的缓存结果。"""
-        graph = self.cache.load(self.fingerprint)
+    def cached_result(
+        self,
+        *,
+        allow_stale: bool = False,
+    ) -> ArchitectureAnalysisResult | None:
+        """读取缓存结果。
+
+        Args:
+            allow_stale: 仅在用户显式选择查看旧缓存时为 True。默认只返回
+                与当前 CodeGraph 指纹匹配的有效缓存。
+        """
+        info = self.cache.info(self.fingerprint)
+        if info.status == "valid":
+            graph = self.cache.load(self.fingerprint)
+        elif allow_stale and info.status == "stale":
+            graph = self.cache.load_stale()
+        else:
+            graph = None
         if graph is None:
             return None
         provider = self.analyzer.provider_name if self.analyzer else ""
@@ -57,7 +72,10 @@ class ArchitectureService:
             cached=True,
             provider=provider,
             model=model,
-            prompt_stats={"cachePath": str(self.cache.path)},
+            prompt_stats={
+                "cachePath": str(self.cache.path),
+                "cacheStatus": info.status,
+            },
         )
 
     async def generate(self, *, force: bool = False) -> ArchitectureAnalysisResult:
@@ -85,7 +103,8 @@ class ArchitectureService:
 
     def status(self) -> dict[str, Any]:
         """返回前端使用的 Provider / 缓存状态，不包含 API Key。"""
-        cached = self.cached_result()
+        info = self.cache.info(self.fingerprint)
+        cached = self.cached_result() if info.status == "valid" else None
         provider = ""
         model = ""
         if self.analyzer is not None:
@@ -96,8 +115,11 @@ class ArchitectureService:
             "profile": self.profile_name or None,
             "provider": provider,
             "model": model,
-            "available": cached is not None,
+            "available": info.status == "valid",
+            "cacheStatus": info.status,
             "generatedAt": cached.graph.generated_at if cached else None,
+            "cacheGeneratedAt": info.generated_at or None,
+            "cacheStoredFingerprint": info.stored_fingerprint or None,
             "cachePath": str(self.cache.path),
             "error": self.provider_error or None,
         }

@@ -2,7 +2,8 @@
 
 缓存只保存已经通过 ``ArchitectureGraphValidator`` 校验的真实 LLM 结果，
 并以 CodeGraph 内容的 SHA-256 作为失效键。源码变化后同一工作区的缓存
-不会继续被使用；它不会被当成静态源码或 Mock 数据展示。
+默认不会继续被使用；用户显式选择时可以读取旧结果，但会返回 ``stale``
+状态，且不会被当成当前源码或 Mock 数据展示。
 """
 
 from __future__ import annotations
@@ -34,15 +35,19 @@ class ArchitectureCacheInfo:
 
     path: Path
     available: bool
+    status: str = "missing"
     generated_at: str = ""
     fingerprint: str = ""
+    stored_fingerprint: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "path": str(self.path),
             "available": self.available,
+            "status": self.status,
             "generatedAt": self.generated_at,
             "fingerprint": self.fingerprint,
+            "storedFingerprint": self.stored_fingerprint,
         }
 
 
@@ -95,8 +100,8 @@ class ArchitectureCache:
             return cls(Path(base_dir).expanduser() / safe_id / "architecture.json")
         return cls(default_architecture_cache_dir(workspace_id) / "architecture.json")
 
-    def load(self, expected_fingerprint: str) -> ArchitectureGraph | None:
-        """读取并校验缓存；不存在、损坏或源码已变化时返回 None。"""
+    def _read_payload(self) -> dict[str, Any] | None:
+        """读取缓存 JSON；文件不存在或损坏时返回 None。"""
         if not self.path.exists():
             return None
         try:
@@ -107,8 +112,9 @@ class ArchitectureCache:
             return None
         if payload.get("schemaVersion") != _CACHE_SCHEMA_VERSION:
             return None
-        if str(payload.get("fingerprint", "")) != expected_fingerprint:
-            return None
+        return payload
+
+    def _graph_from_payload(self, payload: dict[str, Any]) -> ArchitectureGraph | None:
         raw_graph = payload.get("graph")
         if not isinstance(raw_graph, dict):
             return None
@@ -119,6 +125,22 @@ class ArchitectureCache:
         if graph.mock:
             return None
         return graph
+
+    def load(self, expected_fingerprint: str) -> ArchitectureGraph | None:
+        """读取并校验缓存；不存在、损坏或源码已变化时返回 None。"""
+        payload = self._read_payload()
+        if payload is None:
+            return None
+        if str(payload.get("fingerprint", "")) != expected_fingerprint:
+            return None
+        return self._graph_from_payload(payload)
+
+    def load_stale(self) -> ArchitectureGraph | None:
+        """读取旧缓存，不校验源码指纹；仅供用户显式查看旧结果。"""
+        payload = self._read_payload()
+        if payload is None:
+            return None
+        return self._graph_from_payload(payload)
 
     def save(self, graph: ArchitectureGraph, fingerprint: str) -> None:
         """原子写入缓存；失败时抛 ArchitectureCacheError。"""
@@ -142,15 +164,30 @@ class ArchitectureCache:
             raise ArchitectureCacheError(f"写入架构缓存失败：{exc}") from exc
 
     def info(self, expected_fingerprint: str) -> ArchitectureCacheInfo:
-        """读取缓存状态；不会抛出损坏文件异常。"""
-        graph = self.load(expected_fingerprint)
+        """读取缓存状态；不会抛出损坏文件异常。
+
+        ``status`` 取值：
+        - ``valid``：缓存存在且源码指纹匹配；
+        - ``stale``：缓存存在但源码指纹已变化；
+        - ``missing``：缓存不存在、损坏或无法解析。
+        """
+        payload = self._read_payload()
+        if payload is None:
+            return ArchitectureCacheInfo(path=self.path, available=False)
+        graph = self._graph_from_payload(payload)
         if graph is None:
             return ArchitectureCacheInfo(path=self.path, available=False)
+        stored_fingerprint = str(payload.get("fingerprint", ""))
+        status = (
+            "valid" if stored_fingerprint == expected_fingerprint else "stale"
+        )
         return ArchitectureCacheInfo(
             path=self.path,
-            available=True,
+            available=status == "valid",
+            status=status,
             generated_at=graph.generated_at,
             fingerprint=expected_fingerprint,
+            stored_fingerprint=stored_fingerprint,
         )
 
     def clear(self) -> None:

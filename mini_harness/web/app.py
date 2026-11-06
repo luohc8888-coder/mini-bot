@@ -316,9 +316,14 @@ def create_app(
         return architecture_service.status()
 
     @app.get("/api/architecture")
-    def architecture_graph() -> dict[str, object]:
+    def architecture_graph(
+        allow_stale: bool = Query(
+            default=False,
+            description="缓存指纹已变化时，是否仍返回旧架构图（用户显式选择）",
+        ),
+    ) -> dict[str, object]:
         """返回当前源码指纹对应的已生成架构图。"""
-        cached = architecture_service.cached_result()
+        cached = architecture_service.cached_result(allow_stale=allow_stale)
         if cached is None:
             raise HTTPException(
                 status_code=404,
