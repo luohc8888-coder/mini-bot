@@ -7,6 +7,9 @@ const KIND_MARKS: Record<BreadcrumbItem["kind"], string> = {
   class: "◆",
   function: "ƒ",
   method: "↳",
+  component: "◆",
+  stage: "▸",
+  condition: "◇",
 };
 
 interface BreadcrumbProps {

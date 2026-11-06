@@ -1,0 +1,724 @@
+{
+  "version": "phase-4.1-mock",
+  "mock": true,
+  "project": {
+    "name": "Mini Harness",
+    "root": "mini-harness",
+    "description": "Phase 4.1 的 Mock ArchitectureGraph：用逻辑组件和执行阶段展示项目如何运行。所有节点与源码关联均为原型数据，尚未经过 LLM 分析或 SymbolIndex 二次校验。"
+  },
+  "defaultViewId": "overview",
+  "views": {
+    "overview": {
+      "id": "overview",
+      "title": "项目总览",
+      "subtitle": "从用户消息到 Agent 执行、模型/工具与响应",
+      "nodes": [
+        {
+          "id": "user",
+          "kind": "stage",
+          "label": "User",
+          "description": "用户通过 CLI 或消息通道提交输入，触发一轮 Agent 处理。",
+          "meta": "外部输入",
+          "position": {
+            "x": 0,
+            "y": 150
+          },
+          "size": {
+            "width": 170,
+            "height": 128
+          },
+          "responsibilities": [
+            "接收用户消息",
+            "发起一次处理请求"
+          ]
+        },
+        {
+          "id": "message-bus",
+          "kind": "stage",
+          "label": "MessageBus",
+          "description": "接收并排队入站消息，交给 AgentLoop 消费。",
+          "meta": "mini_harness.bus.queue",
+          "position": {
+            "x": 200,
+            "y": 145
+          },
+          "size": {
+            "width": 230,
+            "height": 134
+          },
+          "responsibilities": [
+            "发布与消费入站消息",
+            "发布出站响应"
+          ],
+          "sourceRefs": [
+            {
+              "filePath": "mini_harness/bus/queue.py",
+              "startLine": 14,
+              "endLine": 93,
+              "symbolId": "class:mini_harness.bus.queue.MessageBus",
+              "symbolName": "MessageBus"
+            }
+          ]
+        },
+        {
+          "id": "agent-loop",
+          "kind": "component",
+          "label": "AgentLoop",
+          "description": "会话级消息循环：调度消息、加载会话、构建上下文、调用 AgentRunner，并持久化结果。",
+          "meta": "mini_harness.agent.loop",
+          "position": {
+            "x": 450,
+            "y": 90
+          },
+          "size": {
+            "width": 410,
+            "height": 252
+          },
+          "detailView": "agent-loop",
+          "responsibilities": [
+            "维持当前 Workspace 的会话循环",
+            "决定有状态或无状态处理分支",
+            "把 Runner 结果转换为出站消息"
+          ],
+          "sourceRefs": [
+            {
+              "filePath": "mini_harness/agent/loop.py",
+              "startLine": 28,
+              "endLine": 529,
+              "symbolId": "class:mini_harness.agent.loop.AgentLoop",
+              "symbolName": "AgentLoop"
+            }
+          ],
+          "nested": [
+            {
+              "id": "agent-runner",
+              "label": "AgentRunner",
+              "kind": "component",
+              "detailView": "agent-runner"
+            }
+          ]
+        },
+        {
+          "id": "provider",
+          "kind": "stage",
+          "label": "LLMProvider",
+          "description": "接收 AgentRunner 的模型请求，返回文本或工具调用。",
+          "meta": "mini_harness.providers.base",
+          "position": {
+            "x": 890,
+            "y": 80
+          },
+          "size": {
+            "width": 250,
+            "height": 134
+          },
+          "responsibilities": [
+            "封装模型请求",
+            "返回流式或聚合响应"
+          ],
+          "sourceRefs": [
+            {
+              "filePath": "mini_harness/providers/base.py",
+              "startLine": 121,
+              "endLine": 201,
+              "symbolId": "class:mini_harness.providers.base.LLMProvider",
+              "symbolName": "LLMProvider"
+            }
+          ]
+        },
+        {
+          "id": "tools",
+          "kind": "stage",
+          "label": "ToolRegistry",
+          "description": "注册并执行工具调用，把工具结果回填给下一轮 Runner。",
+          "meta": "mini_harness.tools.registry",
+          "position": {
+            "x": 890,
+            "y": 235
+          },
+          "size": {
+            "width": 250,
+            "height": 134
+          },
+          "responsibilities": [
+            "发现可用工具",
+            "执行工具并返回观察结果"
+          ],
+          "sourceRefs": [
+            {
+              "filePath": "mini_harness/tools/registry.py",
+              "startLine": 12,
+              "endLine": 155,
+              "symbolId": "class:mini_harness.tools.registry.ToolRegistry",
+              "symbolName": "ToolRegistry"
+            }
+          ]
+        },
+        {
+          "id": "response",
+          "kind": "stage",
+          "label": "Response",
+          "description": "把最终文本、工具结果或错误转换为出站响应。",
+          "meta": "输出阶段",
+          "position": {
+            "x": 1190,
+            "y": 155
+          },
+          "size": {
+            "width": 200,
+            "height": 128
+          },
+          "responsibilities": [
+            "组装最终响应",
+            "交给 MessageBus 发布"
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "id": "overview-user-message",
+          "source": "user",
+          "target": "message-bus",
+          "kind": "flow",
+          "confidence": "static",
+          "label": "输入"
+        },
+        {
+          "id": "overview-message-loop",
+          "source": "message-bus",
+          "target": "agent-loop",
+          "kind": "flow",
+          "confidence": "static",
+          "label": "投递"
+        },
+        {
+          "id": "overview-loop-provider",
+          "source": "agent-loop",
+          "target": "provider",
+          "kind": "data",
+          "confidence": "static",
+          "label": "模型请求"
+        },
+        {
+          "id": "overview-loop-tools",
+          "source": "agent-loop",
+          "target": "tools",
+          "kind": "data",
+          "confidence": "static",
+          "label": "工具调用"
+        },
+        {
+          "id": "overview-provider-response",
+          "source": "provider",
+          "target": "response",
+          "kind": "flow",
+          "confidence": "static",
+          "label": "文本输出"
+        },
+        {
+          "id": "overview-tools-loop",
+          "source": "tools",
+          "target": "agent-loop",
+          "kind": "branch",
+          "confidence": "inferred",
+          "label": "工具结果回填"
+        }
+      ]
+    },
+    "agent-loop": {
+      "id": "agent-loop",
+      "title": "AgentLoop 内部流程",
+      "subtitle": "消息调度、会话分支、上下文构建与结果持久化",
+      "nodes": [
+        {
+          "id": "run",
+          "kind": "stage",
+          "label": "run",
+          "description": "AgentLoop 的主循环入口，持续消费 MessageBus 的入站消息。",
+          "meta": "mini_harness.agent.loop",
+          "position": {
+            "x": 0,
+            "y": 100
+          },
+          "size": {
+            "width": 220,
+            "height": 128
+          },
+          "responsibilities": [
+            "启动循环",
+            "等待并消费消息"
+          ],
+          "sourceRefs": [
+            {
+              "filePath": "mini_harness/agent/loop.py",
+              "startLine": 138,
+              "endLine": 178,
+              "symbolId": "method:mini_harness.agent.loop.AgentLoop.run",
+              "symbolName": "AgentLoop.run"
+            }
+          ]
+        },
+        {
+          "id": "dispatch",
+          "kind": "stage",
+          "label": "消息调度",
+          "description": "把入站消息派发到有状态或无状态处理路径。",
+          "meta": "mini_harness.agent.loop",
+          "position": {
+            "x": 250,
+            "y": 100
+          },
+          "size": {
+            "width": 220,
+            "height": 128
+          },
+          "responsibilities": [
+            "区分消息类型",
+            "选择处理分支"
+          ],
+          "sourceRefs": [
+            {
+              "filePath": "mini_harness/agent/loop.py",
+              "startLine": 190,
+              "endLine": 207,
+              "symbolId": "method:mini_harness.agent.loop.AgentLoop._dispatch_inbound",
+              "symbolName": "AgentLoop._dispatch_inbound"
+            }
+          ]
+        },
+        {
+          "id": "has-session",
+          "kind": "condition",
+          "label": "has session?",
+          "description": "根据消息是否绑定会话，进入会话加载或一次性处理分支。",
+          "meta": "分支条件",
+          "position": {
+            "x": 500,
+            "y": 100
+          },
+          "size": {
+            "width": 200,
+            "height": 118
+          }
+        },
+        {
+          "id": "session-load",
+          "kind": "stage",
+          "label": "会话加载",
+          "description": "加载历史消息和会话摘要，为上下文构建提供输入。",
+          "meta": "mini_harness.session.manager",
+          "position": {
+            "x": 735,
+            "y": 0
+          },
+          "size": {
+            "width": 230,
+            "height": 134
+          },
+          "responsibilities": [
+            "读取会话文件",
+            "还原历史消息"
+          ],
+          "sourceRefs": [
+            {
+              "filePath": "mini_harness/session/manager.py",
+              "startLine": 122,
+              "endLine": 154,
+              "symbolId": "method:mini_harness.session.manager.SessionManager.load",
+              "symbolName": "SessionManager.load"
+            }
+          ]
+        },
+        {
+          "id": "stateless",
+          "kind": "stage",
+          "label": "无状态处理",
+          "description": "没有持久会话时，直接构造一次性请求。",
+          "meta": "mini_harness.agent.loop",
+          "position": {
+            "x": 735,
+            "y": 200
+          },
+          "size": {
+            "width": 230,
+            "height": 128
+          },
+          "responsibilities": [
+            "构造临时上下文",
+            "跳过会话持久化"
+          ],
+          "sourceRefs": [
+            {
+              "filePath": "mini_harness/agent/loop.py",
+              "startLine": 227,
+              "endLine": 237,
+              "symbolId": "method:mini_harness.agent.loop.AgentLoop._process_stateless",
+              "symbolName": "AgentLoop._process_stateless"
+            }
+          ]
+        },
+        {
+          "id": "context",
+          "kind": "stage",
+          "label": "上下文构建",
+          "description": "调用 ContextGovernor 在 Token 预算内准备模型请求。",
+          "meta": "mini_harness.agent.governor",
+          "position": {
+            "x": 995,
+            "y": 0
+          },
+          "size": {
+            "width": 240,
+            "height": 134
+          },
+          "responsibilities": [
+            "估计与裁剪上下文",
+            "保留最近完整轮次"
+          ],
+          "sourceRefs": [
+            {
+              "filePath": "mini_harness/agent/governor.py",
+              "startLine": 434,
+              "endLine": 569,
+              "symbolId": "method:mini_harness.agent.governor.ContextGovernor.prepare_request",
+              "symbolName": "ContextGovernor.prepare_request"
+            }
+          ]
+        },
+        {
+          "id": "runner",
+          "kind": "component",
+          "label": "AgentRunner",
+          "description": "执行模型请求、工具调用和循环判断；点击进入其内部执行流程。",
+          "meta": "mini_harness.agent.runner",
+          "position": {
+            "x": 1265,
+            "y": 0
+          },
+          "size": {
+            "width": 260,
+            "height": 140
+          },
+          "detailView": "agent-runner",
+          "responsibilities": [
+            "调用 Provider",
+            "协调工具调用",
+            "返回最终结果"
+          ],
+          "sourceRefs": [
+            {
+              "filePath": "mini_harness/agent/runner.py",
+              "startLine": 112,
+              "endLine": 536,
+              "symbolId": "class:mini_harness.agent.runner.AgentRunner",
+              "symbolName": "AgentRunner"
+            }
+          ]
+        },
+        {
+          "id": "persist",
+          "kind": "stage",
+          "label": "结果持久化",
+          "description": "把成功结果或失败状态写回会话，并生成出站消息。",
+          "meta": "mini_harness.agent.loop",
+          "position": {
+            "x": 1265,
+            "y": 190
+          },
+          "size": {
+            "width": 240,
+            "height": 134
+          },
+          "responsibilities": [
+            "保存会话状态",
+            "构造出站响应"
+          ],
+          "sourceRefs": [
+            {
+              "filePath": "mini_harness/agent/loop.py",
+              "startLine": 239,
+              "endLine": 427,
+              "symbolId": "method:mini_harness.agent.loop.AgentLoop._process_with_session",
+              "symbolName": "AgentLoop._process_with_session"
+            }
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "id": "loop-run-dispatch",
+          "source": "run",
+          "target": "dispatch",
+          "kind": "flow",
+          "confidence": "static"
+        },
+        {
+          "id": "loop-dispatch-session",
+          "source": "dispatch",
+          "target": "has-session",
+          "kind": "flow",
+          "confidence": "static"
+        },
+        {
+          "id": "loop-session-load",
+          "source": "has-session",
+          "target": "session-load",
+          "kind": "branch",
+          "confidence": "inferred",
+          "label": "有会话"
+        },
+        {
+          "id": "loop-session-stateless",
+          "source": "has-session",
+          "target": "stateless",
+          "kind": "branch",
+          "confidence": "inferred",
+          "label": "无会话"
+        },
+        {
+          "id": "loop-load-context",
+          "source": "session-load",
+          "target": "context",
+          "kind": "data",
+          "confidence": "static"
+        },
+        {
+          "id": "loop-stateless-runner",
+          "source": "stateless",
+          "target": "runner",
+          "kind": "flow",
+          "confidence": "static"
+        },
+        {
+          "id": "loop-context-runner",
+          "source": "context",
+          "target": "runner",
+          "kind": "data",
+          "confidence": "static",
+          "label": "请求"
+        },
+        {
+          "id": "loop-runner-persist",
+          "source": "runner",
+          "target": "persist",
+          "kind": "flow",
+          "confidence": "static",
+          "label": "结果"
+        },
+        {
+          "id": "loop-persist-run",
+          "source": "persist",
+          "target": "run",
+          "kind": "dependency",
+          "confidence": "inferred",
+          "label": "下一轮"
+        }
+      ]
+    },
+    "agent-runner": {
+      "id": "agent-runner",
+      "title": "AgentRunner 内部流程",
+      "subtitle": "模型请求、工具调用、循环与退出分支",
+      "nodes": [
+        {
+          "id": "prepare",
+          "kind": "stage",
+          "label": "准备请求",
+          "description": "把会话消息、系统提示和工具定义整理成 Provider 请求。",
+          "meta": "mini_harness.agent.runner",
+          "position": {
+            "x": 0,
+            "y": 100
+          },
+          "size": {
+            "width": 230,
+            "height": 134
+          },
+          "responsibilities": [
+            "转换消息格式",
+            "附带工具定义"
+          ],
+          "sourceRefs": [
+            {
+              "filePath": "mini_harness/agent/runner.py",
+              "startLine": 185,
+              "endLine": 199,
+              "symbolId": "method:mini_harness.agent.runner.AgentRunner._provider_messages",
+              "symbolName": "AgentRunner._provider_messages"
+            }
+          ]
+        },
+        {
+          "id": "provider-request",
+          "kind": "stage",
+          "label": "Provider 请求",
+          "description": "调用模型 Provider，接收文本增量与 tool_calls。",
+          "meta": "mini_harness.agent.runner",
+          "position": {
+            "x": 270,
+            "y": 100
+          },
+          "size": {
+            "width": 240,
+            "height": 134
+          },
+          "responsibilities": [
+            "发起模型请求",
+            "收集流式响应"
+          ],
+          "sourceRefs": [
+            {
+              "filePath": "mini_harness/agent/runner.py",
+              "startLine": 201,
+              "endLine": 305,
+              "symbolId": "method:mini_harness.agent.runner.AgentRunner._request",
+              "symbolName": "AgentRunner._request"
+            }
+          ]
+        },
+        {
+          "id": "tool-calls",
+          "kind": "condition",
+          "label": "tool_calls?",
+          "description": "判断模型响应是否包含工具调用。",
+          "meta": "分支条件",
+          "position": {
+            "x": 550,
+            "y": 100
+          },
+          "size": {
+            "width": 200,
+            "height": 118
+          }
+        },
+        {
+          "id": "execute-tools",
+          "kind": "stage",
+          "label": "执行工具",
+          "description": "通过 ToolRegistry 执行工具，并把观察结果写回消息历史。",
+          "meta": "mini_harness.tools.registry",
+          "position": {
+            "x": 790,
+            "y": 20
+          },
+          "size": {
+            "width": 240,
+            "height": 134
+          },
+          "responsibilities": [
+            "执行 tool_calls",
+            "记录工具结果"
+          ],
+          "sourceRefs": [
+            {
+              "filePath": "mini_harness/tools/registry.py",
+              "startLine": 75,
+              "endLine": 86,
+              "symbolId": "method:mini_harness.tools.registry.ToolRegistry.execute",
+              "symbolName": "ToolRegistry.execute"
+            }
+          ]
+        },
+        {
+          "id": "continue-loop",
+          "kind": "condition",
+          "label": "继续循环?",
+          "description": "根据工具结果与轮次预算决定继续请求模型还是结束。",
+          "meta": "分支条件",
+          "position": {
+            "x": 790,
+            "y": 190
+          },
+          "size": {
+            "width": 210,
+            "height": 118
+          }
+        },
+        {
+          "id": "finish",
+          "kind": "stage",
+          "label": "结束并返回",
+          "description": "把最终文本、工具结果或退出原因返回给 AgentLoop。",
+          "meta": "mini_harness.agent.runner",
+          "position": {
+            "x": 1050,
+            "y": 100
+          },
+          "size": {
+            "width": 210,
+            "height": 134
+          },
+          "responsibilities": [
+            "生成最终结果",
+            "结束当前 Runner 调用"
+          ],
+          "sourceRefs": [
+            {
+              "filePath": "mini_harness/agent/runner.py",
+              "startLine": 307,
+              "endLine": 536,
+              "symbolId": "method:mini_harness.agent.runner.AgentRunner._run_core",
+              "symbolName": "AgentRunner._run_core"
+            }
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "id": "runner-prepare-provider",
+          "source": "prepare",
+          "target": "provider-request",
+          "kind": "flow",
+          "confidence": "static"
+        },
+        {
+          "id": "runner-provider-tool-calls",
+          "source": "provider-request",
+          "target": "tool-calls",
+          "kind": "flow",
+          "confidence": "static"
+        },
+        {
+          "id": "runner-tool-calls-tools",
+          "source": "tool-calls",
+          "target": "execute-tools",
+          "kind": "branch",
+          "confidence": "inferred",
+          "label": "有工具调用"
+        },
+        {
+          "id": "runner-tool-calls-finish",
+          "source": "tool-calls",
+          "target": "finish",
+          "kind": "branch",
+          "confidence": "inferred",
+          "label": "无工具调用"
+        },
+        {
+          "id": "runner-tools-continue",
+          "source": "execute-tools",
+          "target": "continue-loop",
+          "kind": "data",
+          "confidence": "static",
+          "label": "观察结果"
+        },
+        {
+          "id": "runner-continue-prepare",
+          "source": "continue-loop",
+          "target": "prepare",
+          "kind": "branch",
+          "confidence": "inferred",
+          "label": "继续"
+        },
+        {
+          "id": "runner-continue-finish",
+          "source": "continue-loop",
+          "target": "finish",
+          "kind": "branch",
+          "confidence": "inferred",
+          "label": "退出"
+        }
+      ]
+    }
+  }
+}

@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { ReactFlowProvider } from "@xyflow/react";
+import { AppHeader } from "../components/AppHeader";
 import { Breadcrumb } from "../components/Breadcrumb";
 import { GraphCanvas } from "../components/GraphCanvas";
 import { InspectorPanel } from "../components/InspectorPanel";
+import { ArchitectureExplorer } from "./ArchitectureExplorer";
 import { fetchExplorerData } from "../graph/api";
 import {
   buildGraphData,
@@ -14,6 +16,7 @@ import {
   type GraphData,
   type GraphIndex,
 } from "../graph/data";
+import type { ExplorerViewMode } from "../types/architecture";
 import type { NodeKind } from "../types/graph";
 
 const KIND_LABELS: Record<NodeKind, string> = {
@@ -34,6 +37,7 @@ export function ExplorerPage() {
   const [reloadKey, setReloadKey] = useState(0);
   const [containerId, setContainerId] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<ExplorerViewMode>("architecture");
 
   useEffect(() => {
     let cancelled = false;
@@ -74,37 +78,23 @@ export function ExplorerPage() {
     [index, containerId, selectedId],
   );
 
-  const header = (
-    <header className="app-header">
-      <div className="brand">
-        <div className="brand__mark" aria-hidden="true">
-          <span>MH</span>
-        </div>
-        <div className="brand__copy">
-          <div className="brand__title">
-            Mini Harness <span>/ Code Explorer</span>
-          </div>
-          <div className="brand__subtitle">
-            本地代码理解工作台 · Phase 4 Live
-          </div>
-        </div>
-      </div>
-
-      <div className="header-meta">
-        <span className="workspace-chip">
-          <span className="status-dot" />
-          {data?.project.root ?? "正在连接本地服务..."}
-        </span>
-        <span className="live-badge">LIVE API</span>
-        <span className="version-chip">V3.0</span>
-      </div>
-    </header>
-  );
+  if (viewMode === "architecture") {
+    return (
+      <ArchitectureExplorer
+        workspaceRoot={data?.project.root ?? "当前 Workspace"}
+        onViewChange={setViewMode}
+      />
+    );
+  }
 
   if (!data || !index || !view) {
     return (
       <div className="app-shell">
-        {header}
+        <AppHeader
+          workspaceRoot={data?.project.root ?? "正在连接本地服务..."}
+          viewMode={viewMode}
+          onViewChange={setViewMode}
+        />
         <main className="state-screen">
           {loading ? (
             <div className="state-card">
@@ -181,7 +171,11 @@ export function ExplorerPage() {
 
   return (
     <div className="app-shell">
-      {header}
+      <AppHeader
+        workspaceRoot={project.root}
+        viewMode={viewMode}
+        onViewChange={setViewMode}
+      />
 
       <main className="workspace">
         <section className="graph-column">

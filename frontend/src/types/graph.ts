@@ -1,3 +1,5 @@
+import type { ArchitectureNodeKind } from "./architecture";
+
 export type NodeKind = "module" | "class" | "function" | "method";
 
 export type EdgeKind = "contains" | "imports" | "calls";
@@ -98,7 +100,7 @@ export interface ApiGraph {
 export interface BreadcrumbItem {
   id: string | null;
   label: string;
-  kind: "project" | NodeKind;
+  kind: "project" | NodeKind | ArchitectureNodeKind;
   isCurrent: boolean;
   clickable: boolean;
 }
