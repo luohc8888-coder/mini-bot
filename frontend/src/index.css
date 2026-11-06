@@ -1540,6 +1540,7 @@ textarea:focus-visible {
 }
 
 .runtime-node__title {
+  flex: 0 0 auto;
   margin-top: 6px;
   overflow: hidden;
   color: #f0f6ff;
@@ -1553,6 +1554,7 @@ textarea:focus-visible {
 
 .runtime-node__description {
   display: -webkit-box;
+  flex: 0 0 auto;
   margin-top: 4px;
   overflow: hidden;
   color: #97abc6;
@@ -1563,6 +1565,7 @@ textarea:focus-visible {
 }
 
 .runtime-node__nested {
+  flex: 0 0 auto;
   margin-top: 7px;
   padding: 6px;
   border: 1px dashed rgba(184, 140, 255, 0.3);
@@ -1574,6 +1577,7 @@ textarea:focus-visible {
   display: flex;
   align-items: center;
   width: 100%;
+  min-height: 40px;
   gap: 7px;
   padding: 6px 7px;
   border: 1px solid rgba(184, 140, 255, 0.2);
@@ -1636,6 +1640,7 @@ textarea:focus-visible {
 
 .runtime-node__footer {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: space-between;
   gap: 8px;

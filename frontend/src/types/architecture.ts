@@ -4,12 +4,15 @@ export type ArchitectureEdgeKind = "flow" | "data" | "branch" | "dependency";
 
 export type ArchitectureConfidence = "static" | "inferred";
 
-/** 逻辑组件/阶段关联到真实源码的范围。Phase 4.3 会用 SymbolIndex 校验。 */
+/** 逻辑组件/阶段关联到真实源码的范围。Phase 4.2 起由后端 SymbolIndex 校验。 */
 export interface ArchitectureSourceRef {
-  filePath: string;
+  symbolId?: string;
+  filePath?: string;
   startLine?: number;
   endLine?: number;
-  symbolId?: string;
+  qualifiedName?: string;
+  /** 后端 SymbolIndex 校验成功后为 true；Mock 阶段保持 false。 */
+  verified?: boolean;
   symbolName?: string;
   note?: string;
 }
@@ -28,6 +31,9 @@ export interface ArchitectureNode {
   label: string;
   description: string;
   meta?: string;
+  parentId?: string;
+  confidence?: ArchitectureConfidence;
+  evidence?: string[];
   position?: { x: number; y: number };
   size?: { width: number; height: number };
   /** 点击该节点时进入的局部执行流程视图。 */
@@ -45,6 +51,8 @@ export interface ArchitectureEdge {
   kind: ArchitectureEdgeKind;
   confidence: ArchitectureConfidence;
   label?: string;
+  evidence?: string[];
+  sourceRefs?: ArchitectureSourceRef[];
   note?: string;
 }
 
@@ -57,6 +65,8 @@ export interface ArchitectureView {
 }
 
 export interface ArchitectureGraph {
+  /** Phase 4.2 起由后端返回；Mock 数据只有 version。 */
+  schemaVersion?: number;
   version: string;
   mock: boolean;
   project: {

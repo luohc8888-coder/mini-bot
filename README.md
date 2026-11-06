@@ -127,6 +127,31 @@ npm install
 npm run build   # 构建并同步到 mini_harness/web/static
 ```
 
+### ArchitectureGraph 语义分析输入（Phase 4.2）
+
+Phase 4.2 在 AST `ProjectIndex` / `CodeGraph` 之上定义了可序列化的 `ArchitectureGraph` 数据模型、`SymbolIndex` 源码引用校验协议，以及确定性的语义分析输入构建器。该层不调用 LLM，也不会把整个项目源码发送给模型；它只输出入口候选、关键符号、受数量限制的 import/call 关系和有界源码窗口。
+
+```bash
+# 查看一次分析输入摘要
+python -m mini_harness.architecture --workspace .
+
+# 输出完整 ArchitectureAnalysisInput JSON
+python -m mini_harness.architecture --workspace . --json
+```
+
+Python 调用方式：
+
+```python
+from mini_harness.explorer import build_code_graph, scan_project
+from mini_harness.architecture import ArchitectureInputBuilder
+
+index = scan_project(".")
+graph = build_code_graph(index)
+analysis_input = ArchitectureInputBuilder(index, graph).build()
+```
+
+架构节点上的源码引用可通过 `SymbolIndex` 校验；解析失败会抛出 `ArchitectureReferenceError`，不会静默保留虚构符号。无法静态确认的关系使用 `confidence="inferred"`。
+
 ## V2 架构
 
 ### 正常聊天路径
