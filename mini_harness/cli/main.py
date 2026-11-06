@@ -5,6 +5,7 @@
     mini-bot
     mini-bot --demo
     mini-bot --list-providers
+    mini-bot web
 
 也支持作为模块运行：
 
@@ -71,6 +72,12 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         prog="mini-bot",
         description="Mini Harness Agent CLI",
     )
+    parser.add_argument(
+        "command",
+        nargs="?",
+        choices=("web",),
+        help="可选命令：web 启动本地 Code Explorer Web 服务",
+    )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
         "--demo",
@@ -96,6 +103,19 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         metavar="PATH",
         default=None,
         help="指定 Workspace；默认使用当前工作目录",
+    )
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        metavar="HOST",
+        help="Web 服务监听地址，默认 127.0.0.1",
+    )
+    parser.add_argument(
+        "--port",
+        type=_port,
+        default=8765,
+        metavar="PORT",
+        help="Web 服务监听端口，默认 8765",
     )
     parser.add_argument(
         "--max-output-tokens",
@@ -176,7 +196,15 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         help="关闭流式输出，等待模型完整回答后一次性打印",
     )
     parser.set_defaults(stream=True)
-    return parser.parse_args(list(argv))
+    args = parser.parse_args(list(argv))
+    if args.command == "web" and (
+        args.demo
+        or args.interactive
+        or args.migrate_session
+        or args.list_providers
+    ):
+        parser.error("web 命令不能与 --demo/--interactive/--migrate-session/--list-providers 同时使用")
+    return args
 
 
 def _positive_output_tokens(value: str) -> int:
@@ -190,6 +218,17 @@ def _positive_output_tokens(value: str) -> int:
     return count
 
 
+def _port(value: str) -> int:
+    """验证 Web 服务端口。"""
+    try:
+        port = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("端口必须是整数") from exc
+    if not 1 <= port <= 65535:
+        raise argparse.ArgumentTypeError("端口必须在 1-65535 之间")
+    return port
+
+
 async def main(argv: Sequence[str] | None = None) -> None:
     """CLI 主入口。
 
@@ -197,6 +236,21 @@ async def main(argv: Sequence[str] | None = None) -> None:
     离线演示时显式传入 ``--demo``。
     """
     args = parse_args([] if argv is None else argv)
+
+    if args.command == "web":
+        from ..web.app import FrontendNotFoundError
+        from ..web.server import run_web_server
+
+        try:
+            await run_web_server(
+                workspace=args.workspace,
+                host=args.host,
+                port=args.port,
+            )
+        except (WorkspaceError, FrontendNotFoundError, OSError) as exc:
+            print(f"Web 服务启动失败：{exc}", file=sys.stderr)
+            raise SystemExit(1) from exc
+        return
 
     if args.list_providers:
         print_provider_catalog()

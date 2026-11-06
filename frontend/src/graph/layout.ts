@@ -1,6 +1,6 @@
 import dagre from "@dagrejs/dagre";
 import { MarkerType, type Edge, type Node } from "@xyflow/react";
-import { getChildren, getChildSummary } from "./mockGraph";
+import { summarizeChildren } from "./data";
 import type { MockEdge, MockNode, NodeKind } from "../types/graph";
 
 export interface ArchitectureNodeData extends Record<string, unknown> {
@@ -40,8 +40,12 @@ function nodeMeta(node: MockNode): string {
   return `${source}${line}`;
 }
 
-function buildFlowNode(node: MockNode): ArchitectureFlowNode {
+function buildFlowNode(
+  node: MockNode,
+  childrenByParent: Map<string | null, MockNode[]>,
+): ArchitectureFlowNode {
   const size = NODE_SIZES[node.kind];
+  const children = childrenByParent.get(node.id) ?? [];
   return {
     id: node.id,
     type: "architecture",
@@ -52,8 +56,8 @@ function buildFlowNode(node: MockNode): ArchitectureFlowNode {
       kindLabel: KIND_LABELS[node.kind],
       meta: nodeMeta(node),
       summary: node.summary ?? "",
-      childSummary: getChildSummary(node),
-      hasChildren: getChildren(node.id).length > 0,
+      childSummary: summarizeChildren(node, children),
+      hasChildren: children.length > 0,
     },
     style: {
       width: size.width,
@@ -113,15 +117,42 @@ export interface LayoutResult {
 /**
  * 用 Dagre 计算当前层级的自动布局。
  *
- * Mock 图很小，布局在渲染前同步完成；Phase 4 接入真实图后可把大图布局
- * 移到 Worker 或服务端。
+ * 当前层级通常只有模块/类/方法几十个节点，布局在渲染前同步完成；
+ * 后续可以把更大层级的布局移到 Worker 或服务端。
  */
 export function layoutGraph(
   mockNodes: MockNode[],
   mockEdges: MockEdge[],
+  childrenByParent: Map<string | null, MockNode[]> = new Map(),
 ): LayoutResult {
   if (mockNodes.length === 0) {
     return { nodes: [], edges: [] };
+  }
+
+  // 小层级使用网格布局：项目根视图通常只有包容器，网格能让标签保持可读；
+  // 大层级再交给 Dagre 做依赖方向布局。
+  if (mockNodes.length <= 40) {
+    const columns = Math.max(1, Math.ceil(Math.sqrt(mockNodes.length)));
+    const cellWidth = 290;
+    const cellHeight = 150;
+    const nodes = mockNodes.map((mockNode, index) => {
+      const flowNode = buildFlowNode(mockNode, childrenByParent);
+      return {
+        ...flowNode,
+        position: {
+          x: (index % columns) * cellWidth,
+          y: Math.floor(index / columns) * cellHeight,
+        },
+      };
+    });
+    const visibleIds = new Set(mockNodes.map((node) => node.id));
+    const edges = mockEdges
+      .filter(
+        (edge) =>
+          visibleIds.has(edge.source) && visibleIds.has(edge.target),
+      )
+      .map(buildFlowEdge);
+    return { nodes, edges };
   }
 
   const graph = new dagre.graphlib.Graph();
@@ -129,10 +160,10 @@ export function layoutGraph(
   graph.setGraph({
     rankdir: "LR",
     align: "UL",
-    nodesep: 52,
-    ranksep: 112,
-    marginx: 28,
-    marginy: 28,
+    nodesep: 32,
+    ranksep: 58,
+    marginx: 16,
+    marginy: 16,
   });
 
   const visibleIds = new Set(mockNodes.map((node) => node.id));
@@ -149,7 +180,7 @@ export function layoutGraph(
   dagre.layout(graph);
 
   const nodes = mockNodes.map((mockNode) => {
-    const flowNode = buildFlowNode(mockNode);
+    const flowNode = buildFlowNode(mockNode, childrenByParent);
     const layoutNode = graph.node(mockNode.id);
     const size = NODE_SIZES[mockNode.kind];
     return {

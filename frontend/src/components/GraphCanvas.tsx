@@ -30,10 +30,15 @@ const MINIMAP_COLORS: Record<NodeKind, string> = {
   method: "#f2c94c",
 };
 
+const FIT_VIEW_OPTIONS = {
+  padding: 0.1,
+};
+
 interface GraphCanvasProps {
   viewKey: string;
   nodes: MockNode[];
   edges: MockEdge[];
+  childrenByParent: Map<string | null, MockNode[]>;
   selectedId: string | null;
   onNodeClick: (nodeId: string) => void;
   onPaneClick: () => void;
@@ -43,6 +48,7 @@ export function GraphCanvas({
   viewKey,
   nodes,
   edges,
+  childrenByParent,
   selectedId,
   onNodeClick,
   onPaneClick,
@@ -54,16 +60,16 @@ export function GraphCanvas({
 
   // 只在层级变化时重新布局；拖拽位置在 React Flow 内部保持。
   useEffect(() => {
-    const layout = layoutGraph(nodes, edges);
+    const layout = layoutGraph(nodes, edges, childrenByParent);
     setFlowNodes(layout.nodes);
     setFlowEdges(layout.edges);
 
     const timer = window.setTimeout(() => {
-      void fitView({ padding: 0.22, duration: 320 });
+      void fitView({ ...FIT_VIEW_OPTIONS, duration: 320 });
     }, 40);
     return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [viewKey, setFlowNodes, setFlowEdges, fitView]);
+  }, [viewKey, childrenByParent, setFlowNodes, setFlowEdges, fitView]);
 
   useEffect(() => {
     setFlowNodes((current) =>
@@ -84,7 +90,7 @@ export function GraphCanvas({
       onNodeClick={(_, node) => onNodeClick(node.id)}
       onPaneClick={onPaneClick}
       fitView
-      fitViewOptions={{ padding: 0.22 }}
+      fitViewOptions={FIT_VIEW_OPTIONS}
       minZoom={0.28}
       maxZoom={1.8}
       nodesConnectable={false}

@@ -12,7 +12,7 @@ CLI → InboundMessage → MessageBus → AgentLoop
 
 项目参考 [HKUDS/nanobot](https://github.com/HKUDS/nanobot) 的分层思路，但有意保持轻量：不依赖 Agent 框架、不使用数据库，只保留消息总线、Agent Loop、Agent Runner、Provider、ToolRegistry、Session/Workspace 产品层和 V2 的 ContextBuilder。
 
-当前功能版本 **Mini Harness V2.2** 在工具调用闭环与 Session/Workspace 之上，增加了上下文预算治理、持久化摘要与长期记忆。Python 包版本号目前为 `0.3.0`。
+当前核心版本 **Mini Harness V2.2** 在工具调用闭环与 Session/Workspace 之上，增加了上下文预算治理、持久化摘要与长期记忆；V3.0 在此基础上提供本地 Code Explorer。Python 包版本号目前为 `0.3.0`。
 
 主要能力：
 
@@ -85,6 +85,47 @@ python -m mini_harness --interactive
 ```
 
 `mini-bot` / `mini-harness` 不带参数时直接进入交互式 CLI；自动化环境请显式使用 `--demo`（一次性离线演示）或其他非交互命令。
+
+## V3.0 Code Explorer
+
+从任意 Python 项目目录启动本地 Code Explorer。服务会固定当前 Workspace，扫描 Python AST，构建 CodeGraph，并由同一个 FastAPI 进程同时提供 API 和静态前端：
+
+```bash
+cd /path/to/mini-harness
+uv sync
+uv tool install --editable .   # 已安装过可跳过
+mini-bot web
+# 浏览器打开 http://127.0.0.1:8765
+```
+
+在其他项目目录启动时同理：
+
+```bash
+cd /path/to/your/python-project
+mini-bot web
+```
+
+可用 `--workspace` 显式绑定项目，或用 `--port` 修改端口：
+
+```bash
+mini-bot web --workspace /path/to/project --port 8765
+```
+
+主要 API：
+
+- `GET /api/health`：服务与 Workspace 健康检查
+- `GET /api/project`：项目元信息与索引统计
+- `GET /api/graph`：完整 CodeGraph（节点、`contains`/`imports`/`calls` 边、统计）
+- `GET /api/node?node_id=...`：单个节点及其直接关系
+- `GET /api/children?parent_id=...`：某一层级的直接子节点
+
+正式运行时不需要单独启动 Vite；FastAPI 的 `/` 提供构建后的 React 前端。只有修改前端源码时才需要：
+
+```bash
+cd frontend
+npm install
+npm run build   # 构建并同步到 mini_harness/web/static
+```
 
 ## V2 架构
 

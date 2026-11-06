@@ -5,7 +5,9 @@ description = "A minimal, runnable, testable agent harness with real LLM provide
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "fastapi>=0.162.0",
     "httpx[socks]>=0.28.0",
+    "uvicorn>=0.54.0",
 ]
 
 [project.scripts]
@@ -27,6 +29,9 @@ package = true
 
 [tool.setuptools.packages.find]
 include = ["mini_harness*"]
+
+[tool.setuptools.package-data]
+"mini_harness.web" = ["static/*", "static/assets/*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

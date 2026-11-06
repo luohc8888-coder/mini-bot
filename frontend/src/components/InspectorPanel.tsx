@@ -1,5 +1,4 @@
-import { getChildSummary, getProjectStats, mockGraph } from "../graph/mockGraph";
-import type { MockNode, NodeKind } from "../types/graph";
+import type { MockNode, MockProject, NodeKind, ViewStats } from "../types/graph";
 
 const KIND_LABELS: Record<NodeKind, string> = {
   module: "模块",
@@ -18,6 +17,9 @@ const KIND_ICONS: Record<NodeKind, string> = {
 interface InspectorPanelProps {
   node: MockNode | null;
   selected: boolean;
+  project: MockProject;
+  stats: ViewStats;
+  childSummary: string;
   onClearSelection: () => void;
 }
 
@@ -43,18 +45,20 @@ function kindClass(node: MockNode | null): string {
 export function InspectorPanel({
   node,
   selected,
+  project,
+  stats,
+  childSummary,
   onClearSelection,
 }: InspectorPanelProps) {
-  const stats = getProjectStats();
   const isLeaf = node?.kind === "function" || node?.kind === "method";
   const lines = node
     ? node.sourcePreview ?? codePlaceholder(node)
     : codePlaceholder({
         id: "project",
         kind: "module",
-        label: mockGraph.project.name,
+        label: project.name,
         parentId: null,
-        path: mockGraph.project.root,
+        path: project.root,
       });
   const startLine = node?.startLine ?? 1;
 
@@ -64,7 +68,7 @@ export function InspectorPanel({
         <div>
           <div className="eyebrow">NODE INSPECTOR</div>
           <h2 className="inspector__title">
-            {node ? node.label : mockGraph.project.name}
+            {node ? node.label : project.name}
           </h2>
         </div>
         {selected ? (
@@ -112,10 +116,10 @@ export function InspectorPanel({
                 <strong className="mono">{node.signature}</strong>
               </div>
             ) : null}
-            {getChildSummary(node) ? (
+            {childSummary ? (
               <div className="meta-grid__item meta-grid__item--wide">
                 <span>包含</span>
-                <strong>{getChildSummary(node)}</strong>
+                <strong>{childSummary}</strong>
               </div>
             ) : null}
           </div>
@@ -124,9 +128,9 @@ export function InspectorPanel({
         <>
           <div className="inspector__badges">
             <span className="kind-pill kind-project">项目</span>
-            <span className="soft-pill">Mock 数据</span>
+            <span className="soft-pill">实时索引</span>
           </div>
-          <p className="inspector__summary">{mockGraph.project.description}</p>
+          <p className="inspector__summary">{project.description}</p>
           <div className="project-stats">
             <div>
               <strong>{stats.modules}</strong>
