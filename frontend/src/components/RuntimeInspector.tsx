@@ -139,9 +139,9 @@ export function RuntimeInspector({
           <div className="empty-hint">
             <span className="empty-hint__icon">⌘</span>
             <div>
-              <strong>点击逻辑组件开始下钻</strong>
+              <strong>单击逻辑组件选中，双击进入内部流程</strong>
               <p>
-                点击带下钻入口的组件查看内部执行流程；带源码引用的组件可在下方查看
+                带下钻入口的组件可双击查看内部执行流程；带源码引用的组件可在下方查看
                 SymbolIndex 校验结果。
               </p>
             </div>

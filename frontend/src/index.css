@@ -1419,6 +1419,16 @@ textarea:focus-visible {
   border-top-style: dashed;
 }
 
+.legend-line--dependency {
+  border-top-color: #b88cff;
+  border-top-style: dashed;
+}
+
+.legend-line--feedback {
+  border-top-color: #f2994a;
+  border-top-style: dotted;
+}
+
 .react-flow__node-runtime {
   border: 0;
   border-radius: 13px;
@@ -1964,6 +1974,86 @@ textarea:focus-visible {
   }
 }
 
+.relation-mode-switch {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid rgba(111, 156, 255, 0.16);
+  border-radius: 7px;
+  background: rgba(8, 15, 27, 0.72);
+}
+
+.relation-mode-button {
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  cursor: pointer;
+  transition:
+    color 150ms ease,
+    background 150ms ease;
+}
+
+.relation-mode-button:hover {
+  color: var(--text);
+  background: rgba(111, 156, 255, 0.08);
+}
+
+.relation-mode-button.is-active {
+  background: rgba(111, 156, 255, 0.16);
+  color: #b9ceff;
+}
+
+.runtime-edge-label {
+  position: absolute;
+  z-index: 4;
+  max-width: 180px;
+  padding: 2px 5px;
+  border: 1px solid rgba(111, 156, 255, 0.2);
+  border-radius: 4px;
+  background: rgba(8, 15, 27, 0.94);
+  color: #a9c0e8;
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  font-weight: 600;
+  line-height: 1.35;
+  text-align: center;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.runtime-edge-label--branch {
+  border-color: rgba(242, 201, 76, 0.24);
+  color: #d9bf74;
+}
+
+.runtime-edge-label--data {
+  border-color: rgba(53, 212, 164, 0.2);
+  color: #78cbb3;
+}
+
+.runtime-edge-label--dependency,
+.runtime-edge-label--other {
+  border-color: rgba(184, 140, 255, 0.2);
+  color: #c6a9ef;
+}
+
+.runtime-edge-label--feedback {
+  border-color: rgba(242, 153, 74, 0.32);
+  color: #e8b77f;
+}
+
+.runtime-edge-label.is-selected {
+  border-color: rgba(122, 167, 255, 0.56);
+  box-shadow: 0 0 12px rgba(77, 128, 255, 0.18);
+  color: #e3edff;
+}
+
 .inspector__error {
   margin-top: 16px;
   padding: 9px 10px;
@@ -1980,6 +2070,11 @@ textarea:focus-visible {
   .architecture-error {
     right: 10px;
     left: 10px;
+  }
+
+  .relation-mode-switch {
+    order: 4;
+    width: 100%;
   }
 
   .architecture-empty {

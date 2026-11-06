@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Background,
   BackgroundVariant,
@@ -8,13 +8,18 @@ import {
   useEdgesState,
   useNodesState,
   useReactFlow,
-  type Edge,
   type NodeTypes,
 } from "@xyflow/react";
 import { RuntimeArchitectureNode } from "./RuntimeArchitectureNode";
+import { RuntimeOrthogonalEdge } from "./RuntimeOrthogonalEdge";
+import { layoutRuntimeView } from "../architecture/elkLayout";
 import {
   buildRuntimeFlowEdge,
-  buildRuntimeFlowNodes,
+  detectFeedbackEdgeIds,
+  isEdgeVisible,
+  type RelationMode,
+  type RuntimeEdgeRoute,
+  type RuntimeFlowEdge,
   type RuntimeFlowNode,
   type RuntimeNodeData,
 } from "../architecture/layout";
@@ -22,6 +27,10 @@ import type { ArchitectureView } from "../types/architecture";
 
 const nodeTypes: NodeTypes = {
   runtime: RuntimeArchitectureNode,
+};
+
+const edgeTypes = {
+  orthogonal: RuntimeOrthogonalEdge,
 };
 
 const MINIMAP_COLORS: Record<string, string> = {
@@ -38,7 +47,9 @@ interface RuntimeCanvasProps {
   view: ArchitectureView;
   graphMock: boolean;
   selectedId: string | null;
+  relationMode: RelationMode;
   onNodeClick: (nodeId: string) => void;
+  onNodeDoubleClick: (nodeId: string) => void;
   onNestedClick: (detailView: string) => void;
   onPaneClick: () => void;
 }
@@ -47,25 +58,74 @@ export function RuntimeCanvas({
   view,
   graphMock,
   selectedId,
+  relationMode,
   onNodeClick,
+  onNodeDoubleClick,
   onNestedClick,
   onPaneClick,
 }: RuntimeCanvasProps) {
   const [flowNodes, setFlowNodes, onNodesChange] =
     useNodesState<RuntimeFlowNode>([]);
-  const [flowEdges, setFlowEdges, onEdgesChange] = useEdgesState<Edge>([]);
+  const [flowEdges, setFlowEdges, onEdgesChange] =
+    useEdgesState<RuntimeFlowEdge>([]);
+  const [edgeRoutes, setEdgeRoutes] = useState<Record<string, RuntimeEdgeRoute>>(
+    {},
+  );
   const { fitView } = useReactFlow();
+  const feedbackEdgeIds = useMemo(
+    () => detectFeedbackEdgeIds(view.edges),
+    [view.edges],
+  );
 
   useEffect(() => {
-    setFlowNodes(buildRuntimeFlowNodes(view, graphMock, onNestedClick));
-    setFlowEdges(view.edges.map(buildRuntimeFlowEdge));
+    let cancelled = false;
+    let fitTimer: number | undefined;
+    setEdgeRoutes({});
 
-    const timer = window.setTimeout(() => {
-      void fitView({ ...FIT_VIEW_OPTIONS, duration: 320 });
-    }, 40);
-    return () => window.clearTimeout(timer);
+    void layoutRuntimeView(view, {
+      mock: graphMock,
+      onNestedClick,
+    }).then((result) => {
+      if (cancelled) {
+        return;
+      }
+      setFlowNodes(result.nodes);
+      setEdgeRoutes(result.edgeRoutes);
+      fitTimer = window.setTimeout(() => {
+        void fitView({ ...FIT_VIEW_OPTIONS, duration: 320 });
+      }, 40);
+    });
+
+    return () => {
+      cancelled = true;
+      if (fitTimer !== undefined) {
+        window.clearTimeout(fitTimer);
+      }
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view, graphMock, onNestedClick, setFlowNodes, setFlowEdges, fitView]);
+  }, [view, graphMock, onNestedClick, setFlowNodes, fitView]);
+
+  useEffect(() => {
+    setFlowEdges(
+      view.edges
+        .filter((edge) => isEdgeVisible(edge, relationMode))
+        .map((edge) =>
+          buildRuntimeFlowEdge(edge, {
+            relationMode,
+            selectedId,
+            route: edgeRoutes[edge.id],
+            feedback: feedbackEdgeIds.has(edge.id),
+          }),
+        ),
+    );
+  }, [
+    view,
+    relationMode,
+    selectedId,
+    edgeRoutes,
+    feedbackEdgeIds,
+    setFlowEdges,
+  ]);
 
   useEffect(() => {
     setFlowNodes((current) =>
@@ -83,8 +143,10 @@ export function RuntimeCanvas({
       onNodesChange={onNodesChange}
       onEdgesChange={onEdgesChange}
       onNodeClick={(_, node) => onNodeClick(node.id)}
+      onNodeDoubleClick={(_, node) => onNodeDoubleClick(node.id)}
       onPaneClick={onPaneClick}
       nodeTypes={nodeTypes}
+      edgeTypes={edgeTypes}
       fitView
       fitViewOptions={FIT_VIEW_OPTIONS}
       minZoom={0.2}

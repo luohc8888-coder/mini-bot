@@ -16,6 +16,11 @@ import {
   findArchitectureNode,
   getArchitectureView,
 } from "../architecture/graph";
+import {
+  isEdgeRelatedToNode,
+  isEdgeVisible,
+  type RelationMode,
+} from "../architecture/layout";
 import type {
   ArchitectureGraph,
   ArchitectureView,
@@ -63,6 +68,7 @@ export function ArchitectureExplorer({
   const [status, setStatus] = useState<ArchitectureStatus | null>(null);
   const [stack, setStack] = useState<ViewStackItem[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [relationMode, setRelationMode] = useState<RelationMode>("main");
   const [loading, setLoading] = useState(true);
   const [analyzing, setAnalyzing] = useState(false);
   const [analysisSource, setAnalysisSource] = useState<AnalysisSource | null>(
@@ -185,6 +191,9 @@ export function ArchitectureExplorer({
       ? findArchitectureNode(graph, currentView.id, selectedId)
       : null;
   const breadcrumbs = useMemo(() => buildRuntimeBreadcrumbs(stack), [stack]);
+  const visibleEdgeCount = currentView
+    ? currentView.edges.filter((edge) => isEdgeVisible(edge, relationMode)).length
+    : 0;
 
   const openView = (view: ArchitectureView, label: string) => {
     setStack((previous) => {
@@ -205,14 +214,31 @@ export function ArchitectureExplorer({
     if (!node) {
       return;
     }
-    if (node.detailView) {
-      const targetView = graph.views[node.detailView];
-      if (targetView) {
-        openView(targetView, node.label);
-      }
+    setSelectedId(node.id);
+    if (
+      relationMode === "main" &&
+      currentView.edges.some(
+        (edge) =>
+          isEdgeRelatedToNode(edge, node.id) &&
+          !isEdgeVisible(edge, "main"),
+      )
+    ) {
+      setRelationMode("focus");
+    }
+  };
+
+  const handleNodeDoubleClick = (nodeId: string) => {
+    if (!graph || !currentView) {
       return;
     }
-    setSelectedId(node.id);
+    const node = findArchitectureNode(graph, currentView.id, nodeId);
+    if (!node?.detailView) {
+      return;
+    }
+    const targetView = graph.views[node.detailView];
+    if (targetView) {
+      openView(targetView, node.label);
+    }
   };
 
   const handleNestedClick = useCallback(
@@ -314,8 +340,49 @@ export function ArchitectureExplorer({
               </span>
             </div>
             {currentView ? (
+              <div className="relation-mode-switch" role="group" aria-label="关系显示模式">
+                <button
+                  type="button"
+                  className={`relation-mode-button${
+                    relationMode === "main" ? " is-active" : ""
+                  }`}
+                  aria-label="主执行流程"
+                  aria-pressed={relationMode === "main"}
+                  title="主执行流程：仅显示 flow / branch 关系"
+                  onClick={() => setRelationMode("main")}
+                >
+                  主流程
+                </button>
+                <button
+                  type="button"
+                  className={`relation-mode-button${
+                    relationMode === "all" ? " is-active" : ""
+                  }`}
+                  aria-label="全部关系"
+                  aria-pressed={relationMode === "all"}
+                  title="全部关系：显示 ArchitectureGraph 中的所有关系"
+                  onClick={() => setRelationMode("all")}
+                >
+                  全部
+                </button>
+                <button
+                  type="button"
+                  className={`relation-mode-button${
+                    relationMode === "focus" ? " is-active" : ""
+                  }`}
+                  aria-label="节点聚焦"
+                  aria-pressed={relationMode === "focus"}
+                  title="节点聚焦：单击节点后高亮直接上下游关系"
+                  onClick={() => setRelationMode("focus")}
+                >
+                  聚焦
+                </button>
+              </div>
+            ) : null}
+            {currentView ? (
               <span className="view-stats">
-                {currentView.nodes.length} 节点 · {currentView.edges.length} 关系
+                {currentView.nodes.length} 节点 · {visibleEdgeCount}/
+                {currentView.edges.length} 关系
               </span>
             ) : null}
             <button
@@ -382,7 +449,7 @@ export function ArchitectureExplorer({
             {currentView ? (
               <>
                 <div className="graph-hints graph-hints--runtime">
-                  <span>点击组件下钻</span>
+                  <span>单击选中 · 双击组件下钻</span>
                   <span className="hint-separator">·</span>
                   <span>拖拽画布</span>
                   <span className="hint-separator">·</span>
@@ -394,7 +461,9 @@ export function ArchitectureExplorer({
                     view={currentView}
                     graphMock={graph?.mock ?? false}
                     selectedId={selectedId}
+                    relationMode={relationMode}
                     onNodeClick={handleNodeClick}
+                    onNodeDoubleClick={handleNodeDoubleClick}
                     onNestedClick={handleNestedClick}
                     onPaneClick={() => setSelectedId(null)}
                   />
@@ -425,6 +494,14 @@ export function ArchitectureExplorer({
                   <span className="legend-group legend-group--muted">
                     <i className="legend-line legend-line--branch" />
                     分支
+                  </span>
+                  <span className="legend-group legend-group--muted">
+                    <i className="legend-line legend-line--dependency" />
+                    依赖
+                  </span>
+                  <span className="legend-group legend-group--muted">
+                    <i className="legend-line legend-line--feedback" />
+                    反馈
                   </span>
                 </div>
               </>

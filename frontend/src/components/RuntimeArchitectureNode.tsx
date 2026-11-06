@@ -19,7 +19,22 @@ export function RuntimeArchitectureNode({
       title={data.description}
     >
       <Handle
+        id="target-left"
         type="target"
+        position={Position.Left}
+        className="runtime-node__handle"
+        isConnectable={false}
+      />
+      <Handle
+        id="target-right"
+        type="target"
+        position={Position.Right}
+        className="runtime-node__handle"
+        isConnectable={false}
+      />
+      <Handle
+        id="source-left"
+        type="source"
         position={Position.Left}
         className="runtime-node__handle"
         isConnectable={false}
@@ -68,11 +83,12 @@ export function RuntimeArchitectureNode({
       <div className="runtime-node__footer">
         <span className="runtime-node__meta">{data.meta || "逻辑节点"}</span>
         <span className="runtime-node__action">
-          {data.detailView ? "进入内部流程 →" : "查看职责"}
+          {data.detailView ? "双击进入内部流程 →" : "查看职责"}
         </span>
       </div>
 
       <Handle
+        id="source-right"
         type="source"
         position={Position.Right}
         className="runtime-node__handle"
