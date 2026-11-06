@@ -87,18 +87,32 @@ class _PythonVisitor(ast.NodeVisitor):
         self.calls: list[CallRecord] = []
         self.diagnostics: list[DiagnosticRecord] = []
         self._scope: list[SymbolRecord] = [module_symbol]
+        self._used_ids: set[str] = {module_symbol.id}
 
     @property
     def current_scope(self) -> SymbolRecord:
         """当前正在访问的最近符号。"""
         return self._scope[-1]
 
+    def _make_id(self, base: str, line: int) -> str:
+        """生成文件内唯一 ID；同名 property getter/setter 等需加行号区分。"""
+        if base not in self._used_ids:
+            self._used_ids.add(base)
+            return base
+        candidate = f"{base}@{line}"
+        suffix = 2
+        while candidate in self._used_ids:
+            candidate = f"{base}@{line}-{suffix}"
+            suffix += 1
+        self._used_ids.add(candidate)
+        return candidate
+
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         """记录类，并把类体中的函数标记为方法。"""
         parent = self.current_scope
         qualified_name = f"{parent.qualified_name}.{node.name}"
         symbol = SymbolRecord(
-            id=f"class:{qualified_name}",
+            id=self._make_id(f"class:{qualified_name}", node.lineno),
             kind="class",
             name=node.name,
             qualified_name=qualified_name,
@@ -136,7 +150,7 @@ class _PythonVisitor(ast.NodeVisitor):
         kind = "method" if parent.kind == "class" else "function"
         qualified_name = f"{parent.qualified_name}.{node.name}"
         symbol = SymbolRecord(
-            id=f"{kind}:{qualified_name}",
+            id=self._make_id(f"{kind}:{qualified_name}", node.lineno),
             kind=kind,
             name=node.name,
             qualified_name=qualified_name,

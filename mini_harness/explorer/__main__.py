@@ -1,4 +1,4 @@
-"""手动运行 Phase 2 扫描器的轻量入口。
+"""手动运行 Code Explorer 扫描与 CodeGraph 的轻量入口。
 
 用法::
 
@@ -15,6 +15,7 @@ import sys
 
 from mini_harness.workspace import WorkspaceError, WorkspaceResolver
 
+from .codegraph import build_code_graph
 from .scanner import scan_project
 from .store import IndexStore
 
@@ -41,6 +42,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="将完整索引 JSON 输出到 stdout。",
     )
+    parser.add_argument(
+        "--graph",
+        action="store_true",
+        help="额外构建 CodeGraph 并输出图统计。",
+    )
+    parser.add_argument(
+        "--graph-json",
+        action="store_true",
+        help="输出完整 CodeGraph JSON（隐含 --graph）。",
+    )
     return parser
 
 
@@ -54,9 +65,19 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(str(exc))
 
     index = scan_project(workspace)
+    graph = (
+        build_code_graph(index)
+        if args.graph or args.graph_json
+        else None
+    )
     if args.save:
         path = IndexStore(workspace).save(index)
         print(f"索引已保存：{path}", file=sys.stderr)
+
+    if args.graph_json:
+        assert graph is not None
+        print(json.dumps(graph.to_dict(), ensure_ascii=False, indent=2))
+        return 0
 
     if args.json:
         print(json.dumps(index.to_dict(), ensure_ascii=False, indent=2))
@@ -71,6 +92,16 @@ def main(argv: list[str] | None = None) -> int:
         f"{stats['functions']} 函数 / {stats['methods']} 方法，"
         f"{stats['imports']} imports / {stats['calls']} calls"
     )
+    if graph is not None:
+        graph_stats = graph.stats
+        print(
+            "CodeGraph："
+            f"{graph_stats['nodes']} 节点 / {graph_stats['edges']} 边，"
+            f"{graph_stats['contains']} contains / "
+            f"{graph_stats['imports']} imports / "
+            f"{graph_stats['calls']} calls，"
+            f"{graph_stats['unresolved']} unresolved"
+        )
     if index.diagnostics:
         print(f"诊断：{len(index.diagnostics)} 条")
         for diagnostic in index.diagnostics[:20]:
