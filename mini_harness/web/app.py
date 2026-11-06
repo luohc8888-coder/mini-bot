@@ -29,10 +29,17 @@ from mini_harness.explorer import (
     scan_project,
 )
 from mini_harness.providers import LLMProvider, ProviderError
-from mini_harness.workspace import Workspace, WorkspaceResolver
+from mini_harness.workspace import (
+    Workspace,
+    WorkspacePathError,
+    WorkspaceResolver,
+)
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
+
+_MAX_SOURCE_LINES = 400
+_MAX_SOURCE_BYTES = 512 * 1024
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_FRONTEND_DIR = _REPO_ROOT / "frontend" / "dist"
@@ -87,6 +94,97 @@ def _project_payload(
         "generatedAt": index.generated_at,
         "stats": index.stats,
         "graphStats": graph.stats,
+    }
+
+
+def _source_payload(
+    workspace: Workspace,
+    graph: CodeGraph,
+    symbol_id: str,
+) -> dict[str, object]:
+    """按符号 ID 读取 Workspace 内的只读源码片段。
+
+    只接受 CodeGraph 中真实存在的 symbol_id，不接收任意前端文件路径；
+    返回值限制为符号行范围，并限制文件大小与返回行数，避免把整个文件
+    或 Workspace 外内容暴露给浏览器。
+    """
+    symbol = graph.get_node(symbol_id)
+    if symbol is None:
+        raise HTTPException(status_code=404, detail=f"符号不存在：{symbol_id}")
+    try:
+        path = workspace.resolve_path(symbol.file_path)
+    except WorkspacePathError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail=f"源码文件不存在：{symbol.file_path}",
+        )
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=f"无法读取源码文件：{symbol.file_path}",
+        ) from exc
+    if size > _MAX_SOURCE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"源码文件过大，无法预览：{symbol.file_path} "
+                f"({size} bytes > {_MAX_SOURCE_BYTES} bytes)"
+            ),
+        )
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(
+            status_code=415,
+            detail=f"源码文件不是 UTF-8 文本：{symbol.file_path}",
+        ) from exc
+    except OSError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=f"无法读取源码文件：{symbol.file_path}",
+        ) from exc
+
+    file_lines = text.splitlines()
+    total_lines = len(file_lines)
+    symbol_start = max(1, min(symbol.start_line, total_lines or 1))
+    symbol_end = max(symbol_start, min(symbol.end_line, total_lines or 1))
+    if total_lines == 0:
+        start_line = 0
+        end_line = 0
+        returned_lines: list[dict[str, object]] = []
+        truncated = False
+    else:
+        start_line = symbol_start
+        end_line = min(symbol_end, start_line + _MAX_SOURCE_LINES - 1)
+        truncated = end_line < symbol_end
+        returned_lines = [
+            {
+                "number": line_number,
+                "text": file_lines[line_number - 1],
+            }
+            for line_number in range(start_line, end_line + 1)
+        ]
+
+    return {
+        "symbolId": symbol.id,
+        "symbolName": symbol.name,
+        "kind": symbol.kind,
+        "qualifiedName": symbol.qualified_name,
+        "filePath": symbol.file_path,
+        "language": symbol.language,
+        "signature": symbol.signature,
+        "docstring": symbol.docstring,
+        "symbolStartLine": symbol.start_line,
+        "symbolEndLine": symbol.end_line,
+        "startLine": start_line,
+        "endLine": end_line,
+        "totalLines": total_lines,
+        "truncated": truncated,
+        "lines": returned_lines,
     }
 
 
@@ -261,6 +359,11 @@ def create_app(
     def node_by_path(node_id: str) -> dict[str, object]:
         """按路径中的节点 ID 查询节点及其直接关系。"""
         return _node_payload(graph, node_id)
+
+    @app.get("/api/source")
+    def source(symbol_id: str = Query(...)) -> dict[str, object]:
+        """按符号 ID 返回只读源码片段，用于运行架构的源码追溯。"""
+        return _source_payload(resolved, graph, symbol_id)
 
     @app.get("/api/children")
     def children(parent_id: str | None = Query(default=None)) -> list[dict]:

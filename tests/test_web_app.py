@@ -102,6 +102,59 @@ def test_web_app_graph_and_node_endpoints(tmp_path: Path) -> None:
         assert missing.status_code == 404
 
 
+def test_web_app_source_endpoint_returns_symbol_snippet(tmp_path: Path) -> None:
+    workspace, _ = _project(tmp_path)
+    app = create_app(workspace, frontend_dir=_frontend(tmp_path))
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/source",
+            params={"symbol_id": "class:pkg.service.Service"},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["symbolName"] == "Service"
+        assert payload["filePath"] == "pkg/service.py"
+        assert payload["startLine"] == 1
+        assert payload["endLine"] >= 4
+        assert payload["truncated"] is False
+        text_by_number = {
+            line["number"]: line["text"] for line in payload["lines"]
+        }
+        assert "class Service:" in text_by_number[1]
+        assert any("def run" in text for text in text_by_number.values())
+
+        missing = client.get(
+            "/api/source",
+            params={"symbol_id": "class:pkg.service.Missing"},
+        )
+        assert missing.status_code == 404
+        assert client.get("/api/source").status_code == 422
+
+
+def test_web_app_source_endpoint_truncates_large_symbol(tmp_path: Path) -> None:
+    workspace, root = _workspace(tmp_path)
+    _write(
+        root,
+        "huge.py",
+        "def huge() -> None:\n" + "    value = 1\n" * 450,
+    )
+    app = create_app(workspace, frontend_dir=_frontend(tmp_path))
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/source",
+            params={"symbol_id": "function:huge.huge"},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["truncated"] is True
+        assert payload["startLine"] == 1
+        assert payload["endLine"] == 400
+        assert payload["symbolEndLine"] > 400
+        assert len(payload["lines"]) == 400
+
+
 def test_web_app_serves_local_static_frontend(tmp_path: Path) -> None:
     workspace, _ = _project(tmp_path)
     app = create_app(workspace, frontend_dir=_frontend(tmp_path))

@@ -4,6 +4,7 @@ import { AppHeader, type ArchitectureBadgeMode } from "../components/AppHeader";
 import { Breadcrumb } from "../components/Breadcrumb";
 import { RuntimeCanvas } from "../components/RuntimeCanvas";
 import { RuntimeInspector } from "../components/RuntimeInspector";
+import { SourcePreviewDrawer } from "../components/SourcePreviewDrawer";
 import {
   ArchitectureApiError,
   architectureErrorMessage,
@@ -23,6 +24,7 @@ import {
 } from "../architecture/layout";
 import type {
   ArchitectureGraph,
+  ArchitectureSourceRef,
   ArchitectureView,
   ExplorerViewMode,
 } from "../types/architecture";
@@ -68,6 +70,9 @@ export function ArchitectureExplorer({
   const [status, setStatus] = useState<ArchitectureStatus | null>(null);
   const [stack, setStack] = useState<ViewStackItem[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [sourceRef, setSourceRef] = useState<ArchitectureSourceRef | null>(
+    null,
+  );
   const [relationMode, setRelationMode] = useState<RelationMode>("main");
   const [loading, setLoading] = useState(true);
   const [analyzing, setAnalyzing] = useState(false);
@@ -86,6 +91,7 @@ export function ArchitectureExplorer({
       },
     ]);
     setSelectedId(null);
+    setSourceRef(null);
   }, []);
 
   const runGeneration = useCallback(
@@ -194,6 +200,17 @@ export function ArchitectureExplorer({
   const visibleEdgeCount = currentView
     ? currentView.edges.filter((edge) => isEdgeVisible(edge, relationMode)).length
     : 0;
+
+  useEffect(() => {
+    setSourceRef(null);
+  }, [selectedId, current?.viewId]);
+
+  const handleSourceSelect = useCallback((source: ArchitectureSourceRef) => {
+    if (!source.symbolId) {
+      return;
+    }
+    setSourceRef(source);
+  }, []);
 
   const openView = (view: ArchitectureView, label: string) => {
     setStack((previous) => {
@@ -400,7 +417,11 @@ export function ArchitectureExplorer({
             </button>
           </div>
 
-          <div className="graph-stage runtime-stage">
+          <div
+            className={`graph-stage runtime-stage${
+              sourceRef ? " runtime-stage--source-open" : ""
+            }`}
+          >
             <div
               className={`runtime-notice${
                 graph && !graph.mock ? " runtime-notice--live" : ""
@@ -465,9 +486,20 @@ export function ArchitectureExplorer({
                     onNodeClick={handleNodeClick}
                     onNodeDoubleClick={handleNodeDoubleClick}
                     onNestedClick={handleNestedClick}
-                    onPaneClick={() => setSelectedId(null)}
+                    onPaneClick={() => {
+                      setSelectedId(null);
+                      setSourceRef(null);
+                    }}
                   />
                 </ReactFlowProvider>
+
+                {sourceRef ? (
+                  <SourcePreviewDrawer
+                    key={sourceRef.symbolId ?? sourceRef.filePath ?? "source-preview"}
+                    source={sourceRef}
+                    onClose={() => setSourceRef(null)}
+                  />
+                ) : null}
 
                 <div className="graph-legend runtime-legend" aria-label="运行架构图例">
                   <span className="legend-group">
@@ -524,6 +556,8 @@ export function ArchitectureExplorer({
             graph={graph}
             selected={selectedId !== null}
             onClearSelection={() => setSelectedId(null)}
+            onSourceSelect={handleSourceSelect}
+            activeSourceId={sourceRef?.symbolId ?? null}
             analysis={
               graph.mock
                 ? null

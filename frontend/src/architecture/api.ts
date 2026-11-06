@@ -1,4 +1,7 @@
-import type { ArchitectureGraph } from "../types/architecture";
+import type {
+  ArchitectureGraph,
+  SourceSnippet,
+} from "../types/architecture";
 
 export interface ArchitectureStatus {
   configured: boolean;
@@ -72,6 +75,9 @@ async function requestJson<T>(input: string, init?: RequestInit): Promise<T> {
   try {
     response = await fetch(input, init);
   } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw error;
+    }
     throw new ArchitectureApiError(
       `无法连接本地 Web 服务：${error instanceof Error ? error.message : String(error)}`,
       0,
@@ -89,6 +95,16 @@ export function fetchArchitectureStatus(): Promise<ArchitectureStatus> {
 
 export function fetchArchitectureGraph(): Promise<ArchitectureGraph> {
   return requestJson<ArchitectureGraph>("/api/architecture");
+}
+
+export function fetchSourceSnippet(
+  symbolId: string,
+  signal?: AbortSignal,
+): Promise<SourceSnippet> {
+  return requestJson<SourceSnippet>(
+    `/api/source?symbol_id=${encodeURIComponent(symbolId)}`,
+    { signal },
+  );
 }
 
 export async function generateArchitecture(

@@ -17,6 +17,30 @@ export interface ArchitectureSourceRef {
   note?: string;
 }
 
+/** 后端按 symbolId 读取的只读源码片段。 */
+export interface SourceSnippetLine {
+  number: number;
+  text: string;
+}
+
+export interface SourceSnippet {
+  symbolId: string;
+  symbolName: string;
+  kind: string;
+  qualifiedName: string;
+  filePath: string;
+  language: string;
+  signature?: string | null;
+  docstring?: string | null;
+  symbolStartLine: number;
+  symbolEndLine: number;
+  startLine: number;
+  endLine: number;
+  totalLines: number;
+  truncated: boolean;
+  lines: SourceSnippetLine[];
+}
+
 /** 在父组件卡片内部展示的嵌套组件入口。 */
 export interface ArchitectureNestedNode {
   id: string;

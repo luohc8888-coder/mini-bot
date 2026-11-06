@@ -2,6 +2,7 @@ import type {
   ArchitectureGraph,
   ArchitectureNode,
   ArchitectureNodeKind,
+  ArchitectureSourceRef,
   ArchitectureView,
 } from "../types/architecture";
 
@@ -29,6 +30,8 @@ interface RuntimeInspectorProps {
   graph: ArchitectureGraph;
   selected: boolean;
   onClearSelection: () => void;
+  onSourceSelect: (source: ArchitectureSourceRef) => void;
+  activeSourceId?: string | null;
   analysis?: RuntimeAnalysisMeta | null;
 }
 
@@ -38,6 +41,8 @@ export function RuntimeInspector({
   graph,
   selected,
   onClearSelection,
+  onSourceSelect,
+  activeSourceId,
   analysis,
 }: RuntimeInspectorProps) {
   const isMock = graph.mock;
@@ -198,32 +203,49 @@ export function RuntimeInspector({
         </div>
         {sourceRefs.length > 0 ? (
           <div className="source-ref-list">
-            {sourceRefs.map((source, index) => (
-              <div
-                className="source-ref"
-                key={`${source.symbolId ?? source.filePath ?? "ref"}:${index}`}
-              >
-                <div className="source-ref__symbol">
-                  <span aria-hidden="true">↳</span>
-                  {source.symbolName ??
-                    source.qualifiedName ??
-                    source.symbolId ??
-                    "关联符号"}
-                  {source.verified ? (
-                    <span className="source-ref__verified">已验证</span>
+            {sourceRefs.map((source, index) => {
+              const active = Boolean(
+                source.symbolId && source.symbolId === activeSourceId,
+              );
+              return (
+                <div
+                  className={`source-ref${active ? " is-active" : ""}`}
+                  key={`${source.symbolId ?? source.filePath ?? "ref"}:${index}`}
+                >
+                  <div className="source-ref__symbol">
+                    <span aria-hidden="true">↳</span>
+                    {source.symbolName ??
+                      source.qualifiedName ??
+                      source.symbolId ??
+                      "关联符号"}
+                    {source.verified ? (
+                      <span className="source-ref__verified">已验证</span>
+                    ) : null}
+                  </div>
+                  <div className="source-ref__bottom">
+                    <div className="source-ref__path">
+                      {source.filePath ?? source.qualifiedName ?? "未知源码路径"}
+                      {source.startLine
+                        ? `:${source.startLine}-${source.endLine ?? source.startLine}`
+                        : ""}
+                    </div>
+                    {source.symbolId ? (
+                      <button
+                        type="button"
+                        className="source-ref__open"
+                        onClick={() => onSourceSelect(source)}
+                        title="在画布底部查看源码"
+                      >
+                        查看源码
+                      </button>
+                    ) : null}
+                  </div>
+                  {source.symbolId ? (
+                    <div className="source-ref__id">{source.symbolId}</div>
                   ) : null}
                 </div>
-                <div className="source-ref__path">
-                  {source.filePath ?? source.qualifiedName ?? "未知源码路径"}
-                  {source.startLine
-                    ? `:${source.startLine}-${source.endLine ?? source.startLine}`
-                    : ""}
-                </div>
-                {source.symbolId ? (
-                  <div className="source-ref__id">{source.symbolId}</div>
-                ) : null}
-              </div>
-            ))}
+              );
+            })}
           </div>
         ) : (
           <div className="panel-empty">
