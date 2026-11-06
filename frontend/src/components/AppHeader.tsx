@@ -1,18 +1,34 @@
 import type { ExplorerViewMode } from "../types/architecture";
 
+export type ArchitectureBadgeMode = "live" | "mock" | "loading" | "ready" | "unconfigured";
+
 interface AppHeaderProps {
   workspaceRoot: string;
   viewMode: ExplorerViewMode;
   onViewChange: (viewMode: ExplorerViewMode) => void;
   subtitle?: string;
+  architectureMode?: ArchitectureBadgeMode;
 }
+
+const ARCHITECTURE_BADGES: Record<
+  ArchitectureBadgeMode,
+  { label: string; className: string }
+> = {
+  live: { label: "LIVE LLM", className: "live-badge" },
+  mock: { label: "MOCK FLOW", className: "mock-badge" },
+  loading: { label: "ANALYZING", className: "live-badge" },
+  ready: { label: "LLM READY", className: "live-badge" },
+  unconfigured: { label: "NO LLM", className: "mock-badge" },
+};
 
 export function AppHeader({
   workspaceRoot,
   viewMode,
   onViewChange,
   subtitle,
+  architectureMode = "mock",
 }: AppHeaderProps) {
+  const architectureBadge = ARCHITECTURE_BADGES[architectureMode];
   return (
     <header className="app-header">
       <div className="brand">
@@ -26,7 +42,7 @@ export function AppHeader({
           <div className="brand__subtitle">
             {subtitle ??
               (viewMode === "architecture"
-                ? "本地代码理解工作台 · Phase 4.1 Mock"
+                ? "AI 驱动的项目架构理解工作台 · Phase 4.3"
                 : "本地代码理解工作台 · Phase 4 Live")}
           </div>
         </div>
@@ -60,7 +76,9 @@ export function AppHeader({
           </button>
         </div>
         {viewMode === "architecture" ? (
-          <span className="mock-badge">MOCK FLOW</span>
+          <span className={architectureBadge.className}>
+            {architectureBadge.label}
+          </span>
         ) : (
           <span className="live-badge">LIVE API</span>
         )}

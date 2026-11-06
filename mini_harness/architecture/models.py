@@ -1,6 +1,6 @@
 """Phase 4.2：ArchitectureGraph 数据模型与源码引用协议。
 
-ArchitectureGraph 是未来 AI 语义架构分析的结构化输出。本模块只定义
+ArchitectureGraph 是 AI 语义架构分析的结构化输出。本模块只定义
 可序列化、可校验的协议对象，不调用 LLM，也不生成任何架构结论。
 
 关键约束：
@@ -371,18 +371,22 @@ class ArchitectureGraph:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ArchitectureGraph:
-        project = data.get("project", {})
-        raw_views = data.get("views", {})
+        project = data.get("project") or {}
+        if not isinstance(project, dict):
+            project = {}
+        raw_views = data.get("views") or {}
         if isinstance(raw_views, dict):
             views = [
                 ArchitectureView.from_dict(item)
                 for item in raw_views.values()
             ]
-        else:
+        elif isinstance(raw_views, list):
             views = [
                 ArchitectureView.from_dict(item)
                 for item in raw_views
             ]
+        else:
+            views = []
         return cls(
             project_name=str(project.get("name", data.get("name", ""))),
             project_root=str(project.get("root", data.get("workspaceRoot", ""))),

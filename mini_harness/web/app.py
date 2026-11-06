@@ -12,15 +12,23 @@ import os
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from mini_harness.architecture import (
+    ArchitectureAnalysisError,
+    ArchitectureAnalyzer,
+    ArchitectureCache,
+    ArchitectureNotConfiguredError,
+    ArchitectureService,
+)
 from mini_harness.explorer import (
     CodeGraph,
     ProjectIndex,
     build_code_graph,
     scan_project,
 )
+from mini_harness.providers import LLMProvider, ProviderError
 from mini_harness.workspace import Workspace, WorkspaceResolver
 
 DEFAULT_HOST = "127.0.0.1"
@@ -105,12 +113,23 @@ def create_app(
     workspace: Workspace | str | Path | None = None,
     *,
     frontend_dir: Path | None = None,
+    architecture_provider: LLMProvider | None = None,
+    architecture_analyzer: ArchitectureAnalyzer | None = None,
+    architecture_cache: ArchitectureCache | None = None,
+    architecture_profile_name: str = "",
+    architecture_provider_error: str = "",
 ) -> FastAPI:
     """创建绑定当前 Workspace 的 FastAPI 应用。
 
     Args:
         workspace: 固定 Workspace；省略时使用当前工作目录。
         frontend_dir: 可选的前端构建目录，默认为仓库 ``frontend/dist``。
+        architecture_provider: 可注入的 LLMProvider；生产环境由
+            ``run_web_server`` 从 CLI profile 创建，测试可注入 MockProvider。
+        architecture_analyzer: 可选的已构造分析器，优先于 provider。
+        architecture_cache: 可选的架构缓存路径/实例。
+        architecture_profile_name: 状态接口展示的 profile 名。
+        architecture_provider_error: Provider 不可用时的可读原因。
 
     Returns:
         FastAPI 应用实例。索引与 CodeGraph 在应用创建时构建。
@@ -132,10 +151,29 @@ def create_app(
         openapi_url="/api/openapi.json",
         redoc_url=None,
     )
+    if architecture_analyzer is None and architecture_provider is not None:
+        architecture_analyzer = ArchitectureAnalyzer(
+            architecture_provider,
+            provider_name=str(
+                getattr(architecture_provider, "provider_name", "")
+                or type(architecture_provider).__name__
+            ),
+            model_name=str(getattr(architecture_provider, "model", "") or ""),
+        )
+    architecture_service = ArchitectureService(
+        index,
+        graph,
+        analyzer=architecture_analyzer,
+        cache=architecture_cache,
+        profile_name=architecture_profile_name,
+        provider_error=architecture_provider_error,
+    )
+
     app.state.workspace = resolved
     app.state.index = index
     app.state.graph = graph
     app.state.frontend_dir = frontend
+    app.state.architecture_service = architecture_service
 
     @app.get("/api/health")
     def health() -> dict[str, object]:
@@ -173,6 +211,46 @@ def create_app(
     ) -> dict[str, object]:
         """``/api/graph`` 的语义别名，方便按产品名称调用。"""
         return project_graph(include_unresolved)
+
+    @app.get("/api/architecture/status")
+    def architecture_status() -> dict[str, object]:
+        """返回 LLM Provider 与架构缓存状态（不暴露 API Key）。"""
+        return architecture_service.status()
+
+    @app.get("/api/architecture")
+    def architecture_graph() -> dict[str, object]:
+        """返回当前源码指纹对应的已生成架构图。"""
+        cached = architecture_service.cached_result()
+        if cached is None:
+            raise HTTPException(
+                status_code=404,
+                detail="运行架构尚未生成；请调用 POST /api/architecture/analyze",
+            )
+        return cached.graph.to_dict()
+
+    @app.post("/api/architecture/analyze")
+    async def analyze_architecture(
+        force: bool = Query(
+            default=False,
+            description="忽略缓存并重新调用 LLM 分析",
+        ),
+    ) -> dict[str, object]:
+        """调用 LLM 生成并校验 ArchitectureGraph。"""
+        try:
+            result = await architecture_service.generate(force=force)
+        except ArchitectureNotConfiguredError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except ArchitectureAnalysisError as exc:
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "detail": str(exc),
+                    "issues": list(exc.details),
+                },
+            )
+        except ProviderError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return result.to_dict()
 
     @app.get("/api/node")
     def node_by_query(node_id: str = Query(...)) -> dict[str, object]:

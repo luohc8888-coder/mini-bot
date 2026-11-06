@@ -116,6 +116,9 @@ class OpenAICompatibleProvider(LLMProvider):
         self.context_window_tokens = context_window_tokens
         self.thinking = thinking
         self.reasoning_effort = reasoning_effort
+        # 架构分析等结构化输出场景可显式关闭 Qwen 系端点的 thinking，
+        # 避免 reasoning_tokens 耗尽 max_tokens 后 content 为空。
+        self.request_thinking_disabled = False
         self.retry_policy = retry_policy if retry_policy is not None else RetryPolicy()
 
     @property
@@ -225,9 +228,16 @@ class OpenAICompatibleProvider(LLMProvider):
             payload["max_tokens"] = self.output_token_limit
         if tools:
             payload["tools"] = tools
-        if self.thinking:
-            host = urlsplit(self.base_url).hostname or ""
-            if host == "maas.qianwenaiapi.com" or host == "dashscope.aliyuncs.com" or host.endswith(".aliyuncs.com") and host.startswith("dashscope"):
+        host = urlsplit(self.base_url).hostname or ""
+        is_qwen_host = (
+            host == "maas.qianwenaiapi.com"
+            or host == "dashscope.aliyuncs.com"
+            or (host.endswith(".aliyuncs.com") and host.startswith("dashscope"))
+        )
+        if self.request_thinking_disabled and is_qwen_host:
+            payload["enable_thinking"] = False
+        elif self.thinking:
+            if is_qwen_host:
                 payload["enable_thinking"] = True
             else:
                 payload["thinking"] = {"type": "enabled"}

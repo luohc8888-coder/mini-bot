@@ -1,5 +1,18 @@
-"""Phase 4.2：ArchitectureGraph 数据模型与语义架构分析输入层。"""
+"""Phase 4.2/4.3：ArchitectureGraph 模型、语义分析输入与 LLM 分析链。"""
 
+from .analyzer import (
+    ArchitectureAnalysisError,
+    ArchitectureAnalysisResult,
+    ArchitectureAnalyzer,
+    ArchitectureNotConfiguredError,
+)
+from .cache import (
+    ArchitectureCache,
+    ArchitectureCacheError,
+    ArchitectureCacheInfo,
+    codegraph_fingerprint,
+    default_architecture_cache_dir,
+)
 from .input import (
     ARCHITECTURE_INPUT_SCHEMA_VERSION,
     ArchitectureAnalysisInput,
@@ -29,6 +42,16 @@ from .models import (
     ArchitectureValidationError,
     ArchitectureView,
 )
+from .prompt import (
+    DEFAULT_ARCHITECTURE_CONTEXT_TOKENS,
+    DEFAULT_ARCHITECTURE_OUTPUT_TOKENS,
+    DEFAULT_ARCHITECTURE_SAFETY_MARGIN_TOKENS,
+    SYSTEM_PROMPT,
+    ArchitecturePrompt,
+    ArchitecturePromptError,
+    build_architecture_prompt,
+)
+from .service import ArchitectureService
 from .source_refs import (
     SOURCE_REFERENCE_PROTOCOL,
     ArchitectureGraphValidator,
@@ -43,6 +66,10 @@ from .source_refs import (
 
 __all__ = [
     "ARCHITECTURE_CONFIDENCES",
+    "DEFAULT_ARCHITECTURE_CONTEXT_TOKENS",
+    "DEFAULT_ARCHITECTURE_OUTPUT_TOKENS",
+    "DEFAULT_ARCHITECTURE_SAFETY_MARGIN_TOKENS",
+    "SYSTEM_PROMPT",
     "ARCHITECTURE_EDGE_KINDS",
     "ARCHITECTURE_GRAPH_SCHEMA_VERSION",
     "ARCHITECTURE_INPUT_SCHEMA_VERSION",
@@ -51,8 +78,14 @@ __all__ = [
     "SOURCE_REFERENCE_PROTOCOL",
     "SOURCE_REFERENCE_PROTOCOL_VERSION",
     "SOURCE_REF_PROTOCOL_VERSION",
+    "ArchitectureAnalysisError",
     "ArchitectureAnalysisInput",
+    "ArchitectureAnalysisResult",
+    "ArchitectureAnalyzer",
     "ArchitectureAnalysisInputBuilder",
+    "ArchitectureCache",
+    "ArchitectureCacheError",
+    "ArchitectureCacheInfo",
     "ArchitectureEdge",
     "ArchitectureEntryPoint",
     "ArchitectureError",
@@ -60,11 +93,15 @@ __all__ = [
     "ArchitectureGraphValidator",
     "ArchitectureInputBuilder",
     "ArchitectureNestedNode",
+    "ArchitectureNotConfiguredError",
     "ArchitectureNode",
     "ArchitectureReferenceError",
     "ArchitectureRelationSummary",
     "ArchitectureSourceExcerpt",
     "ArchitectureSourceRef",
+    "ArchitecturePrompt",
+    "ArchitecturePromptError",
+    "ArchitectureService",
     "ArchitectureSymbolSummary",
     "ArchitectureValidationError",
     "ArchitectureValidationIssue",
@@ -74,6 +111,9 @@ __all__ = [
     "SourceRefProtocol",
     "SymbolIndex",
     "build_architecture_input",
+    "build_architecture_prompt",
+    "codegraph_fingerprint",
+    "default_architecture_cache_dir",
     "parse_architecture_graph",
     "validate_architecture_graph",
 ]

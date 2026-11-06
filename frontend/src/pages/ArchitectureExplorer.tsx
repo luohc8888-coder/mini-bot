@@ -1,15 +1,23 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ReactFlowProvider } from "@xyflow/react";
-import { AppHeader } from "../components/AppHeader";
+import { AppHeader, type ArchitectureBadgeMode } from "../components/AppHeader";
 import { Breadcrumb } from "../components/Breadcrumb";
 import { RuntimeCanvas } from "../components/RuntimeCanvas";
 import { RuntimeInspector } from "../components/RuntimeInspector";
 import {
+  ArchitectureApiError,
+  architectureErrorMessage,
+  fetchArchitectureGraph,
+  fetchArchitectureStatus,
+  generateArchitecture,
+  type ArchitectureStatus,
+} from "../architecture/api";
+import {
   findArchitectureNode,
   getArchitectureView,
-  mockArchitecture,
-} from "../architecture/mockArchitecture";
+} from "../architecture/graph";
 import type {
+  ArchitectureGraph,
   ArchitectureView,
   ExplorerViewMode,
 } from "../types/architecture";
@@ -25,6 +33,8 @@ interface ViewStackItem {
   label: string;
 }
 
+type AnalysisSource = "cache" | "generated";
+
 function buildRuntimeBreadcrumbs(stack: ViewStackItem[]): BreadcrumbItem[] {
   return stack.map((item, index) => ({
     id: item.viewId,
@@ -35,31 +45,151 @@ function buildRuntimeBreadcrumbs(stack: ViewStackItem[]): BreadcrumbItem[] {
   }));
 }
 
+const EMPTY_BREADCRUMBS: BreadcrumbItem[] = [
+  {
+    id: "overview",
+    label: "运行架构",
+    kind: "project",
+    isCurrent: true,
+    clickable: false,
+  },
+];
+
 export function ArchitectureExplorer({
   workspaceRoot,
   onViewChange,
 }: ArchitectureExplorerProps) {
-  const [stack, setStack] = useState<ViewStackItem[]>([
-    {
-      viewId: mockArchitecture.defaultViewId,
-      label: "运行架构",
-    },
-  ]);
+  const [graph, setGraph] = useState<ArchitectureGraph | null>(null);
+  const [status, setStatus] = useState<ArchitectureStatus | null>(null);
+  const [stack, setStack] = useState<ViewStackItem[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [analysisSource, setAnalysisSource] = useState<AnalysisSource | null>(
+    null,
+  );
+  const [error, setError] = useState<string | null>(null);
+  const startedRef = useRef(false);
+
+  const applyGraph = useCallback((nextGraph: ArchitectureGraph) => {
+    setGraph(nextGraph);
+    setStack([
+      {
+        viewId: nextGraph.defaultViewId,
+        label: "运行架构",
+      },
+    ]);
+    setSelectedId(null);
+  }, []);
+
+  const runGeneration = useCallback(
+    async (force: boolean) => {
+      setAnalyzing(true);
+      setError(null);
+      try {
+        const result = await generateArchitecture(force);
+        applyGraph(result.graph);
+        setAnalysisSource(result.cached ? "cache" : "generated");
+        setStatus((current) =>
+          current
+            ? {
+                ...current,
+                available: true,
+                generatedAt:
+                  current.generatedAt ?? new Date().toISOString(),
+              }
+            : current,
+        );
+      } catch (err) {
+        setError(architectureErrorMessage(err));
+      } finally {
+        setAnalyzing(false);
+        setLoading(false);
+      }
+    },
+    [applyGraph],
+  );
+
+  useEffect(() => {
+    if (startedRef.current) {
+      return;
+    }
+    startedRef.current = true;
+    let cancelled = false;
+
+    const load = async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const nextStatus = await fetchArchitectureStatus();
+        if (cancelled) {
+          return;
+        }
+        setStatus(nextStatus);
+
+        try {
+          const cachedGraph = await fetchArchitectureGraph();
+          if (!cancelled) {
+            applyGraph(cachedGraph);
+            setAnalysisSource("cache");
+          }
+        } catch (loadError) {
+          if (cancelled) {
+            return;
+          }
+          if (
+            loadError instanceof ArchitectureApiError &&
+            loadError.status === 404
+          ) {
+            if (!nextStatus.configured) {
+              setError(
+                nextStatus.error ??
+                  "尚未配置 LLM Provider，暂时无法生成运行架构。",
+              );
+              return;
+            }
+            setAnalyzing(true);
+            const result = await generateArchitecture(false);
+            if (!cancelled) {
+              applyGraph(result.graph);
+              setAnalysisSource(result.cached ? "cache" : "generated");
+            }
+          } else {
+            throw loadError;
+          }
+        }
+      } catch (loadError) {
+        if (!cancelled) {
+          setError(architectureErrorMessage(loadError));
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+          setAnalyzing(false);
+        }
+      }
+    };
+
+    void load();
+    return () => {
+      cancelled = true;
+      startedRef.current = false;
+    };
+  }, [applyGraph]);
 
   const current = stack[stack.length - 1];
-  const currentView = getArchitectureView(mockArchitecture, current.viewId);
-  const selectedNode = findArchitectureNode(
-    mockArchitecture,
-    currentView.id,
-    selectedId,
-  );
+  const currentView =
+    graph && current ? getArchitectureView(graph, current.viewId) : null;
+  const selectedNode =
+    graph && currentView
+      ? findArchitectureNode(graph, currentView.id, selectedId)
+      : null;
   const breadcrumbs = useMemo(() => buildRuntimeBreadcrumbs(stack), [stack]);
 
   const openView = (view: ArchitectureView, label: string) => {
     setStack((previous) => {
       const active = previous[previous.length - 1];
-      if (active.viewId === view.id) {
+      if (active?.viewId === view.id) {
         return previous;
       }
       return [...previous, { viewId: view.id, label }];
@@ -68,16 +198,15 @@ export function ArchitectureExplorer({
   };
 
   const handleNodeClick = (nodeId: string) => {
-    const node = findArchitectureNode(
-      mockArchitecture,
-      currentView.id,
-      nodeId,
-    );
+    if (!graph || !currentView) {
+      return;
+    }
+    const node = findArchitectureNode(graph, currentView.id, nodeId);
     if (!node) {
       return;
     }
     if (node.detailView) {
-      const targetView = mockArchitecture.views[node.detailView];
+      const targetView = graph.views[node.detailView];
       if (targetView) {
         openView(targetView, node.label);
       }
@@ -88,16 +217,16 @@ export function ArchitectureExplorer({
 
   const handleNestedClick = useCallback(
     (detailView: string) => {
-      const targetView = mockArchitecture.views[detailView];
+      const targetView = graph?.views[detailView];
       if (!targetView) {
         return;
       }
-      const nested = currentView.nodes
+      const nested = currentView?.nodes
         .flatMap((node) => node.nested ?? [])
         .find((node) => node.detailView === detailView);
-      openView(targetView, nested?.label ?? "内部流程");
+      openView(targetView, nested?.label ?? targetView.title);
     },
-    [currentView],
+    [currentView, graph],
   );
 
   const handleBreadcrumb = (viewId: string | null) => {
@@ -120,13 +249,35 @@ export function ArchitectureExplorer({
     setSelectedId(null);
   };
 
+  const badgeMode: ArchitectureBadgeMode = graph
+    ? graph.mock
+      ? "mock"
+      : "live"
+    : analyzing
+      ? "loading"
+      : status?.configured
+        ? "ready"
+        : status
+          ? "unconfigured"
+          : "loading";
+
+  const subtitle = graph
+    ? graph.mock
+      ? "AI 驱动的项目架构理解工作台 · Mock"
+      : "AI 驱动的项目架构理解工作台 · Phase 4.3"
+    : analyzing
+      ? "AI 正在读取结构化索引并生成运行架构…"
+      : "AI 驱动的项目架构理解工作台 · Phase 4.3";
+
+
   return (
     <div className="app-shell">
       <AppHeader
         workspaceRoot={workspaceRoot}
         viewMode="architecture"
         onViewChange={onViewChange}
-        subtitle="AI 驱动的项目架构理解工作台 · Phase 4.1 Mock"
+        subtitle={subtitle}
+        architectureMode={badgeMode}
       />
 
       <main className="workspace">
@@ -145,102 +296,343 @@ export function ArchitectureExplorer({
 
             <div className="toolbar-divider" aria-hidden="true" />
 
-            <Breadcrumb items={breadcrumbs} onNavigate={handleBreadcrumb} />
+            <Breadcrumb
+              items={currentView ? breadcrumbs : EMPTY_BREADCRUMBS}
+              onNavigate={handleBreadcrumb}
+            />
 
             <div className="toolbar-spacer" />
 
             <div className="view-context">
               <span className="context-dot kind-runtime-architecture" />
-              <span>{currentView.title}</span>
-              <span className="view-context__kind">运行架构</span>
+              <span>
+                {currentView?.title ??
+                  (analyzing ? "AI 分析中" : "运行架构")}
+              </span>
+              <span className="view-context__kind">
+                {graph?.mock ? "Mock" : graph ? "LLM 架构" : "等待生成"}
+              </span>
             </div>
-            <span className="view-stats">
-              {currentView.nodes.length} 节点 · {currentView.edges.length} 关系
-            </span>
+            {currentView ? (
+              <span className="view-stats">
+                {currentView.nodes.length} 节点 · {currentView.edges.length} 关系
+              </span>
+            ) : null}
+            <button
+              type="button"
+              className="ghost-button architecture-regenerate"
+              onClick={() => void runGeneration(true)}
+              disabled={!status?.configured || analyzing}
+              title={
+                status?.configured
+                  ? "忽略缓存并重新调用 LLM 分析"
+                  : "尚未配置 LLM Provider"
+              }
+            >
+              {analyzing ? "分析中…" : "重新生成"}
+            </button>
           </div>
 
           <div className="graph-stage runtime-stage">
-            <div className="runtime-notice">
+            <div
+              className={`runtime-notice${
+                graph && !graph.mock ? " runtime-notice--live" : ""
+              }`}
+            >
               <span className="runtime-notice__mark" aria-hidden="true">
                 ✦
               </span>
-              <span className="runtime-notice__title">MOCK ARCHITECTURE</span>
+              <span className="runtime-notice__title">
+                {analyzing
+                  ? "ANALYZING"
+                  : graph?.mock
+                    ? "MOCK ARCHITECTURE"
+                    : graph
+                      ? "AI ARCHITECTURE"
+                      : "NO ARCHITECTURE"}
+              </span>
               <span className="runtime-notice__copy">
-                Phase 4.1 · 不调用 LLM / 不修改后端协议
+                {analyzing
+                  ? "LLM 正在读取结构化索引与源码窗口"
+                  : graph?.mock
+                    ? "Phase 4.1 · 不调用 LLM"
+                    : graph
+                      ? "Phase 4.3 · SymbolIndex 已验证"
+                      : "尚未生成可交互的运行架构"}
               </span>
             </div>
 
-            <div className="graph-hints graph-hints--runtime">
-              <span>点击组件下钻</span>
-              <span className="hint-separator">·</span>
-              <span>拖拽画布</span>
-              <span className="hint-separator">·</span>
-              <span>滚轮缩放</span>
-            </div>
+            {error ? (
+              <div className="architecture-error" role="alert">
+                <div>
+                  <strong>架构分析失败</strong>
+                  <span>{error}</span>
+                </div>
+                <button
+                  type="button"
+                  className="ghost-button"
+                  onClick={() => void runGeneration(true)}
+                  disabled={!status?.configured || analyzing}
+                >
+                  重试
+                </button>
+              </div>
+            ) : null}
 
-            <ReactFlowProvider>
-              <RuntimeCanvas
-                view={currentView}
-                graphMock={mockArchitecture.mock}
-                selectedId={selectedId}
-                onNodeClick={handleNodeClick}
-                onNestedClick={handleNestedClick}
-                onPaneClick={() => setSelectedId(null)}
+            {currentView ? (
+              <>
+                <div className="graph-hints graph-hints--runtime">
+                  <span>点击组件下钻</span>
+                  <span className="hint-separator">·</span>
+                  <span>拖拽画布</span>
+                  <span className="hint-separator">·</span>
+                  <span>滚轮缩放</span>
+                </div>
+
+                <ReactFlowProvider>
+                  <RuntimeCanvas
+                    view={currentView}
+                    graphMock={graph?.mock ?? false}
+                    selectedId={selectedId}
+                    onNodeClick={handleNodeClick}
+                    onNestedClick={handleNestedClick}
+                    onPaneClick={() => setSelectedId(null)}
+                  />
+                </ReactFlowProvider>
+
+                <div className="graph-legend runtime-legend" aria-label="运行架构图例">
+                  <span className="legend-group">
+                    <i className="legend-dot legend-dot--component" />
+                    逻辑组件
+                  </span>
+                  <span className="legend-group">
+                    <i className="legend-dot legend-dot--stage" />
+                    执行阶段
+                  </span>
+                  <span className="legend-group">
+                    <i className="legend-dot legend-dot--condition" />
+                    条件分支
+                  </span>
+                  <span className="legend-divider" />
+                  <span className="legend-group legend-group--muted">
+                    <i className="legend-line legend-line--flow" />
+                    执行流
+                  </span>
+                  <span className="legend-group legend-group--muted">
+                    <i className="legend-line legend-line--data" />
+                    数据流
+                  </span>
+                  <span className="legend-group legend-group--muted">
+                    <i className="legend-line legend-line--branch" />
+                    分支
+                  </span>
+                </div>
+              </>
+            ) : (
+              <ArchitectureEmptyState
+                loading={loading}
+                analyzing={analyzing}
+                status={status}
+                error={error}
+                onGenerate={() => void runGeneration(false)}
               />
-            </ReactFlowProvider>
-
-            <div className="graph-legend runtime-legend" aria-label="运行架构图例">
-              <span className="legend-group">
-                <i className="legend-dot legend-dot--component" />
-                逻辑组件
-              </span>
-              <span className="legend-group">
-                <i className="legend-dot legend-dot--stage" />
-                执行阶段
-              </span>
-              <span className="legend-group">
-                <i className="legend-dot legend-dot--condition" />
-                条件分支
-              </span>
-              <span className="legend-divider" />
-              <span className="legend-group legend-group--muted">
-                <i className="legend-line legend-line--flow" />
-                执行流
-              </span>
-              <span className="legend-group legend-group--muted">
-                <i className="legend-line legend-line--data" />
-                数据流
-              </span>
-              <span className="legend-group legend-group--muted">
-                <i className="legend-line legend-line--branch" />
-                分支
-              </span>
-            </div>
+            )}
           </div>
         </section>
 
-        <RuntimeInspector
-          node={selectedNode}
-          view={currentView}
-          graph={mockArchitecture}
-          selected={selectedId !== null}
-          onClearSelection={() => setSelectedId(null)}
-        />
+        {graph && currentView ? (
+          <RuntimeInspector
+            node={selectedNode}
+            view={currentView}
+            graph={graph}
+            selected={selectedId !== null}
+            onClearSelection={() => setSelectedId(null)}
+            analysis={
+              graph.mock
+                ? null
+                : {
+                    provider: status?.provider ?? "",
+                    model: status?.model ?? "",
+                    source: analysisSource,
+                  }
+            }
+          />
+        ) : (
+          <ArchitectureEmptyInspector
+            workspaceRoot={workspaceRoot}
+            status={status}
+            loading={loading}
+            analyzing={analyzing}
+            error={error}
+          />
+        )}
       </main>
 
       <footer className="status-bar">
         <span>
-          <span className="status-dot status-dot--mock" />
+          <span
+            className={`status-dot${
+              graph && !graph.mock ? " status-dot--green" : ""
+            }`}
+          />
           固定 Workspace：{workspaceRoot}
         </span>
         <span className="status-bar__right">
-          <span>Mock ArchitectureGraph</span>
+          <span>
+            {graph
+              ? graph.mock
+                ? "Mock ArchitectureGraph"
+                : "LLM ArchitectureGraph"
+              : "ArchitectureGraph 未生成"}
+          </span>
           <span className="status-bar__divider">/</span>
-          <span>Phase 4.1 原型</span>
+          <span>{status?.provider || "Provider 未配置"}</span>
           <span className="status-bar__divider">/</span>
-          <span>无 LLM 调用</span>
+          <span>{analysisSource === "cache" ? "缓存结果" : graph ? "本次生成" : "无 LLM 调用"}</span>
         </span>
       </footer>
     </div>
+  );
+}
+
+interface ArchitectureEmptyStateProps {
+  loading: boolean;
+  analyzing: boolean;
+  status: ArchitectureStatus | null;
+  error: string | null;
+  onGenerate: () => void;
+}
+
+function ArchitectureEmptyState({
+  loading,
+  analyzing,
+  status,
+  error,
+  onGenerate,
+}: ArchitectureEmptyStateProps) {
+  const busy = loading || analyzing;
+  const canGenerate = Boolean(status?.configured) && !busy;
+  return (
+    <div className="architecture-empty">
+      <span className="architecture-empty__mark" aria-hidden="true">
+        ✦
+      </span>
+      <h3>
+        {analyzing
+          ? "正在分析项目架构"
+          : loading
+            ? "正在加载运行架构"
+            : "还没有生成运行架构"}
+      </h3>
+      <p>
+        {analyzing
+          ? "LLM 正在读取有界的项目索引、关键符号和源码窗口；所有源码引用都会经过 SymbolIndex 校验。"
+          : loading
+            ? "正在检查本地缓存与 Provider 状态。"
+            : status?.configured
+              ? "点击下方按钮，让 LLM 基于 AST/CodeGraph 生成可交互的语义架构图。"
+              : "运行架构需要先在 mini-bot 中配置 LLM Provider。代码结构浏览不依赖 LLM。"}
+      </p>
+      {status && !status.configured ? (
+        <div className="architecture-empty__hint">
+          {status.error ?? "请先运行 mini-bot 完成 Provider 配置。"}
+        </div>
+      ) : null}
+      {error ? <div className="architecture-empty__error">{error}</div> : null}
+      {busy ? (
+        <div className="architecture-progress">
+          <span />
+          正在工作…
+        </div>
+      ) : (
+        <button
+          type="button"
+          className="primary-button architecture-empty__action"
+          onClick={onGenerate}
+          disabled={!canGenerate}
+        >
+          生成运行架构
+        </button>
+      )}
+    </div>
+  );
+}
+
+interface ArchitectureEmptyInspectorProps {
+  workspaceRoot: string;
+  status: ArchitectureStatus | null;
+  loading: boolean;
+  analyzing: boolean;
+  error: string | null;
+}
+
+function ArchitectureEmptyInspector({
+  workspaceRoot,
+  status,
+  loading,
+  analyzing,
+  error,
+}: ArchitectureEmptyInspectorProps) {
+  return (
+    <aside className="inspector runtime-inspector">
+      <div className="inspector__header">
+        <div>
+          <div className="eyebrow">ARCHITECTURE INSPECTOR</div>
+          <h2 className="inspector__title">{workspaceRoot}</h2>
+        </div>
+      </div>
+      <div className="inspector__badges">
+        <span className="kind-pill kind-runtime-component">项目架构</span>
+        <span className={`soft-pill${status?.configured ? "" : " soft-pill--warn"}`}>
+          {analyzing || loading
+            ? "检查中"
+            : status?.configured
+              ? "LLM Ready"
+              : "LLM 未配置"}
+        </span>
+      </div>
+      <p className="inspector__summary">
+        运行架构由 Phase 4.2 的结构化分析输入驱动，通过 LLM 生成语义组件与执行链，
+        再使用 SymbolIndex 校验源码引用。
+      </p>
+      <div className="meta-grid">
+        <div className="meta-grid__item">
+          <span>Provider</span>
+          <strong>{status?.provider || "未配置"}</strong>
+        </div>
+        <div className="meta-grid__item">
+          <span>模型</span>
+          <strong>{status?.model || "—"}</strong>
+        </div>
+        <div className="meta-grid__item meta-grid__item--wide">
+          <span>缓存状态</span>
+          <strong>{status?.available ? "已有缓存" : "尚未生成"}</strong>
+        </div>
+      </div>
+      <section className="panel-section">
+        <div className="panel-section__title">
+          <span>源码引用协议</span>
+          <span className="section-tag">SymbolIndex</span>
+        </div>
+        <div className="ai-reserved">
+          <div className="ai-reserved__intro">
+            <span className="ai-reserved__spark">✦</span>
+            <p>
+              LLM 只输出结构化 ArchitectureGraph，不输出 Mermaid；任何无法在
+              SymbolIndex 中验证的源码引用都会被拒绝，无法静态确认的关系标记为 inferred。
+            </p>
+          </div>
+        </div>
+      </section>
+      {error ? <div className="inspector__error">{error}</div> : null}
+      <div className="inspector__footer">
+        <span className={status?.configured ? "status-dot status-dot--green" : "status-dot status-dot--mock"} />
+        <span>
+          {status?.configured
+            ? "LLM Provider 已就绪 · 只读分析"
+            : "等待 Provider 配置 · 代码结构浏览可用"}
+        </span>
+      </div>
+    </aside>
   );
 }

@@ -118,6 +118,12 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         help="Web 服务监听端口，默认 8765",
     )
     parser.add_argument(
+        "--architecture-profile",
+        default=None,
+        metavar="NAME",
+        help="Web 运行架构分析使用的 Provider profile；默认使用默认配置",
+    )
+    parser.add_argument(
         "--max-output-tokens",
         type=_positive_output_tokens,
         default=None,
@@ -246,6 +252,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
                 workspace=args.workspace,
                 host=args.host,
                 port=args.port,
+                architecture_profile=args.architecture_profile,
             )
         except (WorkspaceError, FrontendNotFoundError, OSError) as exc:
             print(f"Web 服务启动失败：{exc}", file=sys.stderr)

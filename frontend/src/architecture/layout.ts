@@ -28,7 +28,7 @@ const KIND_LABELS: Record<ArchitectureNodeKind, string> = {
 };
 
 const DEFAULT_SIZES: Record<ArchitectureNodeKind, { width: number; height: number }> = {
-  component: { width: 360, height: 232 },
+  component: { width: 360, height: 150 },
   stage: { width: 220, height: 128 },
   condition: { width: 190, height: 118 },
 };
@@ -60,14 +60,18 @@ export function buildRuntimeFlowNodes(
   mock: boolean,
   onNestedClick: (detailView: string) => void,
 ): RuntimeFlowNode[] {
+  const columnCount =
+    view.nodes.length <= 4 ? 2 : view.nodes.length <= 9 ? 3 : 4;
+  const cellWidth = 440;
+  const cellHeight = 300;
   return view.nodes.map((node, index) => {
     const size = runtimeNodeSize(node);
     return {
       id: node.id,
       type: "runtime",
       position: node.position ?? {
-        x: (index % 4) * 320,
-        y: Math.floor(index / 4) * 180,
+        x: (index % columnCount) * cellWidth,
+        y: Math.floor(index / columnCount) * cellHeight,
       },
       data: {
         label: node.label,

@@ -1,7 +1,7 @@
 """Phase 4.2：从 CodeGraph 构建语义架构分析输入。
 
 这一层只做确定性的结构化整理，不调用 LLM。它把完整 CodeGraph 压缩成
-未来 ArchitectureAnalyzer 可以消费的输入包：
+ArchitectureAnalyzer 可直接消费的输入包：
 
 - 入口候选与关键符号（带真实 SymbolIndex ID）；
 - 模块清单；
@@ -9,7 +9,8 @@
 - 入口/关键符号的有限源码窗口（按需读取，绝不倾倒整个项目）；
 - 源码引用协议和本次输入的限制参数。
 
-真正的语义组件划分、执行链推断和 token 预算在 Phase 4.3 实现。
+真正的语义组件划分、执行链推断和 Token 预算由 Phase 4.3 的
+ArchitectureAnalyzer 完成。
 """
 
 from __future__ import annotations
@@ -197,7 +198,7 @@ class ArchitectureSourceExcerpt:
 
 @dataclass(frozen=True, slots=True)
 class ArchitectureAnalysisInput:
-    """未来 LLM 架构分析的结构化输入包。"""
+    """LLM 架构分析使用的结构化输入包。"""
 
     workspace_root: str
     workspace_id: str

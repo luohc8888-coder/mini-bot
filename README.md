@@ -32,6 +32,7 @@ CLI → InboundMessage → MessageBus → AgentLoop
 - 瞬时错误重试：429/5xx/网络故障按指数退避重试（默认 3 次尝试），优先采用服务端 Retry-After；流式响应一旦产生增量就不再重试，避免重复输出
 - `AgentRunResult.new_messages` 显式边界，避免 System Prompt 或裁剪后历史污染 Session
 - `/context` CLI 调试命令，展示真实 Token 预算与选择结果；`/last-prompt` 展示最后一次真实 Provider 请求快照
+- V3.0 Code Explorer：真实 AST CodeGraph API、React Flow 结构浏览与 Phase 4.3 LLM 运行架构分析
 - V1 的 Workspace、Session 持久化、多轮恢复、流式输出和全部 V0 能力保持不变
 
 ## 当前状态
@@ -118,6 +119,9 @@ mini-bot web --workspace /path/to/project --port 8765
 - `GET /api/graph`：完整 CodeGraph（节点、`contains`/`imports`/`calls` 边、统计）
 - `GET /api/node?node_id=...`：单个节点及其直接关系
 - `GET /api/children?parent_id=...`：某一层级的直接子节点
+- `GET /api/architecture/status`：LLM Provider 与架构缓存状态（不含 API Key）
+- `GET /api/architecture`：读取当前源码指纹对应的 ArchitectureGraph
+- `POST /api/architecture/analyze?force=false`：调用 LLM 生成并校验运行架构
 
 正式运行时不需要单独启动 Vite；FastAPI 的 `/` 提供构建后的 React 前端。只有修改前端源码时才需要：
 
@@ -151,6 +155,51 @@ analysis_input = ArchitectureInputBuilder(index, graph).build()
 ```
 
 架构节点上的源码引用可通过 `SymbolIndex` 校验；解析失败会抛出 `ArchitectureReferenceError`，不会静默保留虚构符号。无法静态确认的关系使用 `confidence="inferred"`。
+
+### 运行架构 LLM 分析（Phase 4.3）
+
+Phase 4.3 在 Phase 4.2 的结构化输入之上接入真实 LLM：`ArchitectureAnalyzer` 构造受 Token 预算约束的 Prompt，调用现有 `LLMProvider`，解析模型返回的 JSON，并通过 `ArchitectureGraphValidator` + `SymbolIndex` 校验所有源码引用。无法确认的关系保留为 `inferred`；LLM 不直接读取整个项目，也不输出 Mermaid。
+
+Web 服务默认从 CLI 保存的默认 Provider profile 读取配置。启动后访问「运行架构」页，首次会生成并缓存 ArchitectureGraph；再次打开会直接复用同源码指纹的缓存：
+
+```bash
+# 使用默认 profile 启动
+mini-bot web --workspace /path/to/project --port 8765
+
+# 指定一个已保存的 CLI profile
+mini-bot web --workspace /path/to/project --architecture-profile Qwen-token
+
+# 不启动 Web，直接从命令行生成并打印分析摘要
+uv run python -m mini_harness.architecture --workspace . --analyze --profile Qwen-token
+```
+
+缓存路径默认是 `~/.mini-harness/architecture/<workspace_id>/architecture.json`，可用 `MINI_HARNESS_ARCHITECTURE_HOME` 改变根目录。缓存以 CodeGraph 内容的 SHA-256 作为失效键；源码变化后会自动重新分析。没有配置 Provider 时，代码结构浏览仍可用，运行架构接口会返回明确的未配置错误。
+
+Python 调用方式：
+
+```python
+import asyncio
+
+from mini_harness.architecture import (
+    ArchitectureAnalyzer,
+    ArchitectureCache,
+    ArchitectureService,
+)
+from mini_harness.explorer import build_code_graph, scan_project
+from mini_harness.providers import create_provider
+
+index = scan_project(".")
+graph = build_code_graph(index)
+provider = create_provider(config)  # 与 CLI 相同的 Provider 配置
+service = ArchitectureService(
+    index,
+    graph,
+    analyzer=ArchitectureAnalyzer(provider),
+    cache=ArchitectureCache.for_workspace(graph.workspace_id),
+)
+result = asyncio.run(service.generate())
+print(result.graph.to_json(indent=2))
+```
 
 ## V2 架构
 
