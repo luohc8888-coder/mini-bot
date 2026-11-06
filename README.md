@@ -724,7 +724,7 @@ API Key 默认从 `DEEPSEEK_API_KEY` 读取，也可以显式传入 `api_key`。
 
 ## 项目结构
 
-完整职责、运行调用关系、兼容清理结果和数据迁移说明见 [代码结构与兼容清单](docs/code_structure_and_compatibility.md)。
+完整职责、运行调用关系、兼容清理结果和数据迁移说明见 [代码结构与兼容清单](docs/code_structure_and_compatibility.md)；分层与调用时序见 [架构总览](docs/architecture_overview.md)。
 
 ```text
 mini-harness/

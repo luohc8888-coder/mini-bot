@@ -1,0 +1,862 @@
+{
+  "project": {
+    "name": "Mini Harness",
+    "root": "mini-harness",
+    "description": "Mini Harness V2.2 的真实模块轮廓，作为 Phase 1 的交互式 Mock 数据。图中结构用于验证下钻、布局与源码/AI 面板，尚未连接 Python AST。",
+    "version": "V2.2 · 0.3.0"
+  },
+  "nodes": [
+    {
+      "id": "module:cli",
+      "kind": "module",
+      "label": "cli",
+      "parentId": null,
+      "path": "mini_harness/cli",
+      "summary": "交互式 CLI、入口参数解析与终端渲染。"
+    },
+    {
+      "id": "module:agent",
+      "kind": "module",
+      "label": "agent",
+      "parentId": null,
+      "path": "mini_harness/agent",
+      "summary": "Agent Core：消息循环、工具执行循环、上下文治理与压缩。"
+    },
+    {
+      "id": "module:providers",
+      "kind": "module",
+      "label": "providers",
+      "parentId": null,
+      "path": "mini_harness/providers",
+      "summary": "LLM Provider 抽象、OpenAI-compatible 与 Anthropic 协议实现。"
+    },
+    {
+      "id": "module:tools",
+      "kind": "module",
+      "label": "tools",
+      "parentId": null,
+      "path": "mini_harness/tools",
+      "summary": "受限的文件、搜索、编辑与命令工具注册表。"
+    },
+    {
+      "id": "module:session",
+      "kind": "module",
+      "label": "session",
+      "parentId": null,
+      "path": "mini_harness/session",
+      "summary": "Session schema、原子持久化、锁与版本迁移。"
+    },
+    {
+      "id": "module:memory",
+      "kind": "module",
+      "label": "memory",
+      "parentId": null,
+      "path": "mini_harness/memory",
+      "summary": "长期记忆、归档历史与 Dream 整理。"
+    },
+    {
+      "id": "module:workspace",
+      "kind": "module",
+      "label": "workspace",
+      "parentId": null,
+      "path": "mini_harness/workspace.py",
+      "summary": "Workspace 固定、路径边界检查与稳定的 workspace_id。"
+    },
+
+    {
+      "id": "class:cli:InteractiveCLI",
+      "kind": "class",
+      "label": "InteractiveCLI",
+      "parentId": "module:cli",
+      "filePath": "mini_harness/cli/app.py",
+      "startLine": 49,
+      "endLine": 756,
+      "summary": "交互式配置菜单与多轮聊天循环；负责读取输入、绑定 Provider 与启动 AgentLoop。"
+    },
+    {
+      "id": "method:cli:InteractiveCLI:__init__",
+      "kind": "method",
+      "label": "__init__",
+      "parentId": "class:cli:InteractiveCLI",
+      "filePath": "mini_harness/cli/app.py",
+      "startLine": 52,
+      "endLine": 171,
+      "signature": "def __init__(...):",
+      "summary": "组装 Workspace、Session、Memory、工具的初始运行态。"
+    },
+    {
+      "id": "method:cli:InteractiveCLI:run",
+      "kind": "method",
+      "label": "run",
+      "parentId": "class:cli:InteractiveCLI",
+      "filePath": "mini_harness/cli/app.py",
+      "startLine": 183,
+      "endLine": 227,
+      "signature": "async def run(self) -> None",
+      "summary": "启动 CLI 主循环；选择配置并进入聊天循环。",
+      "sourcePreview": [
+        "async def run(self) -> None:",
+        "    self._show_banner()",
+        "    selection = await self._select_config()",
+        "    if selection is None:",
+        "        return",
+        "    await self._chat_loop(selection)"
+      ]
+    },
+    {
+      "id": "method:cli:InteractiveCLI:_chat_loop",
+      "kind": "method",
+      "label": "_chat_loop",
+      "parentId": "class:cli:InteractiveCLI",
+      "filePath": "mini_harness/cli/app.py",
+      "startLine": 253,
+      "endLine": 397,
+      "signature": "async def _chat_loop(self, selection):",
+      "summary": "解析斜杠命令并调度用户回合。"
+    },
+    {
+      "id": "method:cli:InteractiveCLI:_run_session_turn",
+      "kind": "method",
+      "label": "_run_session_turn",
+      "parentId": "class:cli:InteractiveCLI",
+      "filePath": "mini_harness/cli/app.py",
+      "startLine": 398,
+      "endLine": 486,
+      "signature": "async def _run_session_turn(...)",
+      "summary": "为单个用户回合构造 MessageBus 与 AgentLoop，并收集 OutboundMessage。"
+    },
+    {
+      "id": "function:cli:parse_args",
+      "kind": "function",
+      "label": "parse_args",
+      "parentId": "module:cli",
+      "filePath": "mini_harness/cli/main.py",
+      "startLine": 68,
+      "endLine": 179,
+      "signature": "def parse_args(argv: Sequence[str]) -> argparse.Namespace",
+      "summary": "解析 CLI 模式、Workspace 与上下文预算等参数。"
+    },
+    {
+      "id": "function:cli:main",
+      "kind": "function",
+      "label": "main",
+      "parentId": "module:cli",
+      "filePath": "mini_harness/cli/main.py",
+      "startLine": 193,
+      "endLine": 249,
+      "signature": "async def main(argv: Sequence[str] | None = None) -> None",
+      "summary": "CLI 主入口；分发 demo、迁移、Provider 列表与交互式运行。",
+      "sourcePreview": [
+        "async def main(argv: Sequence[str] | None = None) -> None:",
+        "    args = parse_args([] if argv is None else argv)",
+        "    if args.demo:",
+        "        await run_demo()",
+        "        return",
+        "    await run_interactive_cli(workspace=args.workspace)"
+      ]
+    },
+    {
+      "id": "function:cli:run_interactive_cli",
+      "kind": "function",
+      "label": "run_interactive_cli",
+      "parentId": "module:cli",
+      "filePath": "mini_harness/cli/main.py",
+      "startLine": 710,
+      "endLine": 756,
+      "signature": "async def run_interactive_cli(...) -> None",
+      "summary": "创建 InteractiveCLI，默认 Workspace 为当前工作目录。"
+    },
+
+    {
+      "id": "class:agent:AgentLoop",
+      "kind": "class",
+      "label": "AgentLoop",
+      "parentId": "module:agent",
+      "filePath": "mini_harness/agent/loop.py",
+      "startLine": 28,
+      "endLine": 530,
+      "summary": "跨轮次消息调度：加载 Session、构建上下文、调用 Runner、保存结果。"
+    },
+    {
+      "id": "method:agent:AgentLoop:run",
+      "kind": "method",
+      "label": "run",
+      "parentId": "class:agent:AgentLoop",
+      "filePath": "mini_harness/agent/loop.py",
+      "startLine": 138,
+      "endLine": 179,
+      "signature": "async def run(self) -> None",
+      "summary": "常驻消息循环，消费 InboundMessage 并发布 OutboundMessage。"
+    },
+    {
+      "id": "method:agent:AgentLoop:_process_message",
+      "kind": "method",
+      "label": "_process_message",
+      "parentId": "class:agent:AgentLoop",
+      "filePath": "mini_harness/agent/loop.py",
+      "startLine": 209,
+      "endLine": 226,
+      "signature": "async def _process_message(self, message)",
+      "summary": "根据 stateless 开关选择无状态或带 Session 的处理路径。"
+    },
+    {
+      "id": "class:agent:AgentRunner",
+      "kind": "class",
+      "label": "AgentRunner",
+      "parentId": "module:agent",
+      "filePath": "mini_harness/agent/runner.py",
+      "startLine": 112,
+      "endLine": 569,
+      "summary": "执行“模型调用 → 工具调用 → 再调用模型”的有限轮迭代。"
+    },
+    {
+      "id": "method:agent:AgentRunner:run",
+      "kind": "method",
+      "label": "run",
+      "parentId": "class:agent:AgentRunner",
+      "filePath": "mini_harness/agent/runner.py",
+      "startLine": 149,
+      "endLine": 182,
+      "signature": "async def run(self, spec: AgentRunSpec) -> AgentRunResult",
+      "summary": "复制初始消息、创建 ContextGovernor 并进入核心循环。",
+      "sourcePreview": [
+        "async def run(self, spec: AgentRunSpec) -> AgentRunResult:",
+        "    messages = deepcopy(spec.initial_messages)",
+        "    governor = ContextGovernor(",
+        "        self.provider, spec.context_config or self.context_config",
+        "    )",
+        "    return await self._run_core(spec, messages, governor)"
+      ]
+    },
+    {
+      "id": "method:agent:AgentRunner:_run_core",
+      "kind": "method",
+      "label": "_run_core",
+      "parentId": "class:agent:AgentRunner",
+      "filePath": "mini_harness/agent/runner.py",
+      "startLine": 307,
+      "endLine": 538,
+      "signature": "async def _run_core(...)",
+      "summary": "单轮多迭代执行：请求治理、工具执行、消息累积与终止判断。"
+    },
+    {
+      "id": "class:agent:ContextGovernor",
+      "kind": "class",
+      "label": "ContextGovernor",
+      "parentId": "module:agent",
+      "filePath": "mini_harness/agent/governor.py",
+      "startLine": 157,
+      "endLine": 732,
+      "summary": "每次 Provider 请求前的上下文预算检查、Compact 与确定性回退。"
+    },
+    {
+      "id": "method:agent:ContextGovernor:prepare_request",
+      "kind": "method",
+      "label": "prepare_request",
+      "parentId": "class:agent:ContextGovernor",
+      "filePath": "mini_harness/agent/governor.py",
+      "startLine": 434,
+      "endLine": 570,
+      "signature": "async def prepare_request(...)",
+      "summary": "在每次请求前执行预算治理并返回可发送的消息。"
+    },
+    {
+      "id": "function:agent:estimate_messages_tokens",
+      "kind": "function",
+      "label": "estimate_messages_tokens",
+      "parentId": "module:agent",
+      "filePath": "mini_harness/agent/tokens.py",
+      "startLine": 74,
+      "endLine": 79,
+      "signature": "def estimate_messages_tokens(messages) -> int",
+      "summary": "估算消息历史的 Token 用量。"
+    },
+
+    {
+      "id": "class:providers:LLMProvider",
+      "kind": "class",
+      "label": "LLMProvider",
+      "parentId": "module:providers",
+      "filePath": "mini_harness/providers/base.py",
+      "startLine": 121,
+      "endLine": 201,
+      "summary": "Provider 抽象接口；定义 chat 与默认 chat_stream。"
+    },
+    {
+      "id": "method:providers:LLMProvider:chat",
+      "kind": "method",
+      "label": "chat",
+      "parentId": "class:providers:LLMProvider",
+      "filePath": "mini_harness/providers/base.py",
+      "startLine": 158,
+      "endLine": 176,
+      "signature": "async def chat(messages, tools=None) -> LLMResponse",
+      "summary": "抽象方法；根据消息历史生成下一步响应。"
+    },
+    {
+      "id": "method:providers:LLMProvider:chat_stream",
+      "kind": "method",
+      "label": "chat_stream",
+      "parentId": "class:providers:LLMProvider",
+      "filePath": "mini_harness/providers/base.py",
+      "startLine": 178,
+      "endLine": 201,
+      "signature": "async def chat_stream(...) -> LLMResponse",
+      "summary": "默认退化为一次普通 chat，并一次性回调完整文本。",
+      "sourcePreview": [
+        "async def chat_stream(self, messages, tools=None, on_text_delta=None):",
+        "    response = await self.chat(messages=messages, tools=tools)",
+        "    if on_text_delta is not None and response.content:",
+        "        on_text_delta(response.content)",
+        "    return response"
+      ]
+    },
+    {
+      "id": "class:providers:OpenAICompatibleProvider",
+      "kind": "class",
+      "label": "OpenAICompatibleProvider",
+      "parentId": "module:providers",
+      "filePath": "mini_harness/providers/openai_compat.py",
+      "startLine": 69,
+      "endLine": 500,
+      "summary": "OpenAI-compatible HTTP Provider，支持流式与工具调用。"
+    },
+    {
+      "id": "method:providers:OpenAICompatibleProvider:chat",
+      "kind": "method",
+      "label": "chat",
+      "parentId": "class:providers:OpenAICompatibleProvider",
+      "filePath": "mini_harness/providers/openai_compat.py",
+      "startLine": 279,
+      "endLine": 377,
+      "signature": "async def chat(...) -> LLMResponse",
+      "summary": "发送非流式 Chat Completions 请求。"
+    },
+    {
+      "id": "method:providers:OpenAICompatibleProvider:chat_stream",
+      "kind": "method",
+      "label": "chat_stream",
+      "parentId": "class:providers:OpenAICompatibleProvider",
+      "filePath": "mini_harness/providers/openai_compat.py",
+      "startLine": 378,
+      "endLine": 500,
+      "signature": "async def chat_stream(...) -> LLMResponse",
+      "summary": "聚合 OpenAI SSE 增量并回调文本。"
+    },
+    {
+      "id": "class:providers:AnthropicProvider",
+      "kind": "class",
+      "label": "AnthropicProvider",
+      "parentId": "module:providers",
+      "filePath": "mini_harness/providers/anthropic.py",
+      "startLine": 32,
+      "endLine": 500,
+      "summary": "Anthropic Messages API 实现，支持 thinking 与流式响应。"
+    },
+    {
+      "id": "method:providers:AnthropicProvider:chat",
+      "kind": "method",
+      "label": "chat",
+      "parentId": "class:providers:AnthropicProvider",
+      "filePath": "mini_harness/providers/anthropic.py",
+      "startLine": 231,
+      "endLine": 325,
+      "signature": "async def chat(...) -> LLMResponse",
+      "summary": "发送 Anthropic Messages 请求并转换工具调用。"
+    },
+    {
+      "id": "function:providers:create_provider",
+      "kind": "function",
+      "label": "create_provider",
+      "parentId": "module:providers",
+      "filePath": "mini_harness/providers/factory.py",
+      "startLine": 93,
+      "endLine": 163,
+      "signature": "def create_provider(config: ProviderConfig) -> LLMProvider",
+      "summary": "根据 ProviderConfig 创建 OpenAI-compatible、Anthropic 或 Mock Provider。"
+    },
+
+    {
+      "id": "class:tools:ToolRegistry",
+      "kind": "class",
+      "label": "ToolRegistry",
+      "parentId": "module:tools",
+      "filePath": "mini_harness/tools/registry.py",
+      "startLine": 12,
+      "endLine": 154,
+      "summary": "注册、Schema 导出、参数校验与受限执行。"
+    },
+    {
+      "id": "method:tools:ToolRegistry:register",
+      "kind": "method",
+      "label": "register",
+      "parentId": "class:tools:ToolRegistry",
+      "filePath": "mini_harness/tools/registry.py",
+      "startLine": 30,
+      "endLine": 45,
+      "signature": "def register(self, tool: Tool) -> None",
+      "summary": "注册一个工具实例。"
+    },
+    {
+      "id": "method:tools:ToolRegistry:execute",
+      "kind": "method",
+      "label": "execute",
+      "parentId": "class:tools:ToolRegistry",
+      "filePath": "mini_harness/tools/registry.py",
+      "startLine": 75,
+      "endLine": 86,
+      "signature": "async def execute(self, name, arguments) -> ToolResult",
+      "summary": "统一限制成功与失败结果的输出大小。"
+    },
+    {
+      "id": "method:tools:ToolRegistry:_execute",
+      "kind": "method",
+      "label": "_execute",
+      "parentId": "class:tools:ToolRegistry",
+      "filePath": "mini_harness/tools/registry.py",
+      "startLine": 88,
+      "endLine": 143,
+      "signature": "async def _execute(self, name, arguments)",
+      "summary": "解析工具、校验参数、应用超时并执行。"
+    },
+    {
+      "id": "class:tools:ReadFileTool",
+      "kind": "class",
+      "label": "ReadFileTool",
+      "parentId": "module:tools",
+      "filePath": "mini_harness/tools/filesystem.py",
+      "startLine": 23,
+      "endLine": 159,
+      "summary": "只读读取 Workspace 内的文本文件。"
+    },
+    {
+      "id": "method:tools:ReadFileTool:execute",
+      "kind": "method",
+      "label": "execute",
+      "parentId": "class:tools:ReadFileTool",
+      "filePath": "mini_harness/tools/filesystem.py",
+      "startLine": 57,
+      "endLine": 154,
+      "signature": "async def execute(self, path, ...)",
+      "summary": "校验路径并返回文本内容。"
+    },
+    {
+      "id": "class:tools:WriteFileTool",
+      "kind": "class",
+      "label": "WriteFileTool",
+      "parentId": "module:tools",
+      "filePath": "mini_harness/tools/filesystem.py",
+      "startLine": 209,
+      "endLine": 300,
+      "summary": "在 Workspace 边界内原子写入文本文件。"
+    },
+    {
+      "id": "method:tools:WriteFileTool:execute",
+      "kind": "method",
+      "label": "execute",
+      "parentId": "class:tools:WriteFileTool",
+      "filePath": "mini_harness/tools/filesystem.py",
+      "startLine": 238,
+      "endLine": 294,
+      "signature": "async def execute(self, path, content)",
+      "summary": "写入文件并保留权限位。"
+    },
+    {
+      "id": "class:tools:RunCommandTool",
+      "kind": "class",
+      "label": "RunCommandTool",
+      "parentId": "module:tools",
+      "filePath": "mini_harness/tools/command.py",
+      "startLine": 31,
+      "endLine": 200,
+      "summary": "在 Workspace 内运行受限命令，需宿主确认。"
+    },
+    {
+      "id": "method:tools:RunCommandTool:execute",
+      "kind": "method",
+      "label": "execute",
+      "parentId": "class:tools:RunCommandTool",
+      "filePath": "mini_harness/tools/command.py",
+      "startLine": 64,
+      "endLine": 180,
+      "signature": "async def execute(self, command, cwd='.')",
+      "summary": "校验 cwd、执行命令并返回截断后的输出。"
+    },
+
+    {
+      "id": "class:session:SessionManager",
+      "kind": "class",
+      "label": "SessionManager",
+      "parentId": "module:session",
+      "filePath": "mini_harness/session/manager.py",
+      "startLine": 79,
+      "endLine": 466,
+      "summary": "加载、保存与清空单个 Workspace 的默认 Session。"
+    },
+    {
+      "id": "method:session:SessionManager:load",
+      "kind": "method",
+      "label": "load",
+      "parentId": "class:session:SessionManager",
+      "filePath": "mini_harness/session/manager.py",
+      "startLine": 122,
+      "endLine": 155,
+      "signature": "def load(self, session_key=None) -> Session",
+      "summary": "读取并校验 Session 文件。"
+    },
+    {
+      "id": "method:session:SessionManager:save",
+      "kind": "method",
+      "label": "save",
+      "parentId": "class:session:SessionManager",
+      "filePath": "mini_harness/session/manager.py",
+      "startLine": 222,
+      "endLine": 285,
+      "signature": "def save(self, session: Session) -> None",
+      "summary": "原子保存 Session，失败时保留旧文件。"
+    },
+    {
+      "id": "function:session:migrate_session",
+      "kind": "function",
+      "label": "migrate_session",
+      "parentId": "module:session",
+      "filePath": "mini_harness/session/migration.py",
+      "startLine": 19,
+      "endLine": 120,
+      "signature": "def migrate_session(manager: SessionManager) -> SessionMigrationResult",
+      "summary": "显式迁移旧 Session 并保留原始备份。"
+    },
+
+    {
+      "id": "class:memory:MemoryStore",
+      "kind": "class",
+      "label": "MemoryStore",
+      "parentId": "module:memory",
+      "filePath": "mini_harness/memory/store.py",
+      "startLine": 67,
+      "endLine": 340,
+      "summary": "memory/ 目录的纯文件 I/O：长期记忆、归档与 Dream cursor。"
+    },
+    {
+      "id": "method:memory:MemoryStore:read_memory",
+      "kind": "method",
+      "label": "read_memory",
+      "parentId": "class:memory:MemoryStore",
+      "filePath": "mini_harness/memory/store.py",
+      "startLine": 110,
+      "endLine": 123,
+      "signature": "def read_memory(self) -> str",
+      "summary": "读取 MEMORY.md；不存在时返回空字符串。"
+    },
+    {
+      "id": "method:memory:MemoryStore:append_history",
+      "kind": "method",
+      "label": "append_history",
+      "parentId": "class:memory:MemoryStore",
+      "filePath": "mini_harness/memory/store.py",
+      "startLine": 142,
+      "endLine": 210,
+      "signature": "def append_history(self, content, ...) -> int",
+      "summary": "以单调 cursor 原子追加归档记录。"
+    },
+    {
+      "id": "class:memory:DreamManager",
+      "kind": "class",
+      "label": "DreamManager",
+      "parentId": "module:memory",
+      "filePath": "mini_harness/memory/dream.py",
+      "startLine": 114,
+      "endLine": 450,
+      "summary": "读取未处理归档并生成长期记忆整理结果。"
+    },
+    {
+      "id": "method:memory:DreamManager:run",
+      "kind": "method",
+      "label": "run",
+      "parentId": "class:memory:DreamManager",
+      "filePath": "mini_harness/memory/dream.py",
+      "startLine": 145,
+      "endLine": 158,
+      "signature": "async def run(self, *, max_entries=None) -> DreamResult",
+      "summary": "执行一次受锁保护的 Dream 整理。"
+    },
+
+    {
+      "id": "class:workspace:Workspace",
+      "kind": "class",
+      "label": "Workspace",
+      "parentId": "module:workspace",
+      "filePath": "mini_harness/workspace.py",
+      "startLine": 40,
+      "endLine": 73,
+      "summary": "已固定的 Workspace 路径与稳定 ID。"
+    },
+    {
+      "id": "method:workspace:Workspace:resolve_path",
+      "kind": "method",
+      "label": "resolve_path",
+      "parentId": "class:workspace:Workspace",
+      "filePath": "mini_harness/workspace.py",
+      "startLine": 51,
+      "endLine": 73,
+      "signature": "def resolve_path(self, value: str | Path) -> Path",
+      "summary": "将相对路径解析到 Workspace 内，并拒绝越界路径。",
+      "sourcePreview": [
+        "def resolve_path(self, value: str | Path) -> Path:",
+        "    raw = Path(value).expanduser()",
+        "    candidate = raw.resolve() if raw.is_absolute() else (self.path / raw).resolve()",
+        "    try:",
+        "        candidate.relative_to(self.path)",
+        "    except ValueError as exc:",
+        "        raise WorkspacePathError(...) from exc",
+        "    return candidate"
+      ]
+    },
+    {
+      "id": "class:workspace:WorkspaceResolver",
+      "kind": "class",
+      "label": "WorkspaceResolver",
+      "parentId": "module:workspace",
+      "filePath": "mini_harness/workspace.py",
+      "startLine": 76,
+      "endLine": 121,
+      "summary": "确定并固定当前进程使用的 Workspace。"
+    },
+    {
+      "id": "method:workspace:WorkspaceResolver:resolve",
+      "kind": "method",
+      "label": "resolve",
+      "parentId": "class:workspace:WorkspaceResolver",
+      "filePath": "mini_harness/workspace.py",
+      "startLine": 96,
+      "endLine": 121,
+      "signature": "def resolve(self, requested=None) -> Workspace",
+      "summary": "解析显式路径或默认当前工作目录。"
+    },
+    {
+      "id": "function:workspace:workspace_id",
+      "kind": "function",
+      "label": "workspace_id",
+      "parentId": "module:workspace",
+      "filePath": "mini_harness/workspace.py",
+      "startLine": 22,
+      "endLine": 36,
+      "signature": "def workspace_id(path: str | Path) -> str",
+      "summary": "根据规范化绝对路径计算稳定 16 位 ID。"
+    }
+  ],
+  "edges": [
+    {
+      "id": "e:root:cli-agent",
+      "source": "module:cli",
+      "target": "module:agent",
+      "kind": "imports",
+      "confidence": "static"
+    },
+    {
+      "id": "e:root:cli-providers",
+      "source": "module:cli",
+      "target": "module:providers",
+      "kind": "imports",
+      "confidence": "static"
+    },
+    {
+      "id": "e:root:cli-tools",
+      "source": "module:cli",
+      "target": "module:tools",
+      "kind": "imports",
+      "confidence": "static"
+    },
+    {
+      "id": "e:root:cli-session",
+      "source": "module:cli",
+      "target": "module:session",
+      "kind": "imports",
+      "confidence": "static"
+    },
+    {
+      "id": "e:root:cli-memory",
+      "source": "module:cli",
+      "target": "module:memory",
+      "kind": "imports",
+      "confidence": "static"
+    },
+    {
+      "id": "e:root:cli-workspace",
+      "source": "module:cli",
+      "target": "module:workspace",
+      "kind": "imports",
+      "confidence": "static"
+    },
+    {
+      "id": "e:root:agent-providers",
+      "source": "module:agent",
+      "target": "module:providers",
+      "kind": "imports",
+      "confidence": "static"
+    },
+    {
+      "id": "e:root:agent-tools",
+      "source": "module:agent",
+      "target": "module:tools",
+      "kind": "imports",
+      "confidence": "static"
+    },
+    {
+      "id": "e:root:agent-workspace",
+      "source": "module:agent",
+      "target": "module:workspace",
+      "kind": "imports",
+      "confidence": "static"
+    },
+    {
+      "id": "e:root:tools-workspace",
+      "source": "module:tools",
+      "target": "module:workspace",
+      "kind": "imports",
+      "confidence": "static"
+    },
+    {
+      "id": "e:root:session-workspace",
+      "source": "module:session",
+      "target": "module:workspace",
+      "kind": "imports",
+      "confidence": "static"
+    },
+    {
+      "id": "e:root:memory-workspace",
+      "source": "module:memory",
+      "target": "module:workspace",
+      "kind": "imports",
+      "confidence": "static"
+    },
+    {
+      "id": "e:root:memory-providers",
+      "source": "module:memory",
+      "target": "module:providers",
+      "kind": "imports",
+      "confidence": "static"
+    },
+
+    {
+      "id": "e:cli:main->parse_args",
+      "source": "function:cli:main",
+      "target": "function:cli:parse_args",
+      "kind": "calls",
+      "confidence": "static"
+    },
+    {
+      "id": "e:cli:main->run_interactive_cli",
+      "source": "function:cli:main",
+      "target": "function:cli:run_interactive_cli",
+      "kind": "calls",
+      "confidence": "static"
+    },
+    {
+      "id": "e:cli:run_interactive_cli->InteractiveCLI",
+      "source": "function:cli:run_interactive_cli",
+      "target": "class:cli:InteractiveCLI",
+      "kind": "calls",
+      "confidence": "static"
+    },
+    {
+      "id": "e:agent:AgentLoop->AgentRunner",
+      "source": "class:agent:AgentLoop",
+      "target": "class:agent:AgentRunner",
+      "kind": "calls",
+      "confidence": "static"
+    },
+    {
+      "id": "e:agent:AgentRunner->ContextGovernor",
+      "source": "class:agent:AgentRunner",
+      "target": "class:agent:ContextGovernor",
+      "kind": "calls",
+      "confidence": "static"
+    },
+    {
+      "id": "e:providers:create_provider->OpenAI",
+      "source": "function:providers:create_provider",
+      "target": "class:providers:OpenAICompatibleProvider",
+      "kind": "calls",
+      "confidence": "static"
+    },
+    {
+      "id": "e:providers:create_provider->Anthropic",
+      "source": "function:providers:create_provider",
+      "target": "class:providers:AnthropicProvider",
+      "kind": "calls",
+      "confidence": "static"
+    },
+    {
+      "id": "e:session:migrate_session->SessionManager",
+      "source": "function:session:migrate_session",
+      "target": "class:session:SessionManager",
+      "kind": "calls",
+      "confidence": "static"
+    },
+    {
+      "id": "e:memory:DreamManager->MemoryStore",
+      "source": "class:memory:DreamManager",
+      "target": "class:memory:MemoryStore",
+      "kind": "calls",
+      "confidence": "static"
+    },
+    {
+      "id": "e:workspace:WorkspaceResolver->Workspace",
+      "source": "class:workspace:WorkspaceResolver",
+      "target": "class:workspace:Workspace",
+      "kind": "calls",
+      "confidence": "static"
+    },
+    {
+      "id": "e:workspace:WorkspaceResolver->workspace_id",
+      "source": "class:workspace:WorkspaceResolver",
+      "target": "function:workspace:workspace_id",
+      "kind": "calls",
+      "confidence": "static"
+    },
+
+    {
+      "id": "e:method:cli:run->_chat_loop",
+      "source": "method:cli:InteractiveCLI:run",
+      "target": "method:cli:InteractiveCLI:_chat_loop",
+      "kind": "calls",
+      "confidence": "static"
+    },
+    {
+      "id": "e:method:cli:_chat_loop->_run_session_turn",
+      "source": "method:cli:InteractiveCLI:_chat_loop",
+      "target": "method:cli:InteractiveCLI:_run_session_turn",
+      "kind": "calls",
+      "confidence": "static"
+    },
+    {
+      "id": "e:method:agent:AgentLoop:run->_process_message",
+      "source": "method:agent:AgentLoop:run",
+      "target": "method:agent:AgentLoop:_process_message",
+      "kind": "calls",
+      "confidence": "static"
+    },
+    {
+      "id": "e:method:agent:AgentRunner:run->_run_core",
+      "source": "method:agent:AgentRunner:run",
+      "target": "method:agent:AgentRunner:_run_core",
+      "kind": "calls",
+      "confidence": "static"
+    },
+    {
+      "id": "e:method:providers:LLMProvider:chat_stream->chat",
+      "source": "method:providers:LLMProvider:chat_stream",
+      "target": "method:providers:LLMProvider:chat",
+      "kind": "calls",
+      "confidence": "static"
+    },
+    {
+      "id": "e:method:tools:ToolRegistry:execute->_execute",
+      "source": "method:tools:ToolRegistry:execute",
+      "target": "method:tools:ToolRegistry:_execute",
+      "kind": "calls",
+      "confidence": "static"
+    }
+  ]
+}
