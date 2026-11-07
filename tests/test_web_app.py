@@ -155,6 +155,28 @@ def test_web_app_source_endpoint_truncates_large_symbol(tmp_path: Path) -> None:
         assert len(payload["lines"]) == 400
 
 
+def test_web_app_source_endpoint_can_return_full_symbol(tmp_path: Path) -> None:
+    workspace, root = _workspace(tmp_path)
+    _write(
+        root,
+        "huge.py",
+        "def huge() -> None:\n" + "    value = 1\n" * 450,
+    )
+    app = create_app(workspace, frontend_dir=_frontend(tmp_path))
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/source",
+            params={"symbol_id": "function:huge.huge", "limit": 1000},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["truncated"] is False
+        assert payload["startLine"] == 1
+        assert payload["endLine"] == 451
+        assert len(payload["lines"]) == 451
+
+
 def test_web_app_serves_local_static_frontend(tmp_path: Path) -> None:
     workspace, _ = _project(tmp_path)
     app = create_app(workspace, frontend_dir=_frontend(tmp_path))

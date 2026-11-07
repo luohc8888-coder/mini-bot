@@ -118,7 +118,7 @@ mini-bot web --workspace /path/to/project --port 8765
 - `GET /api/project`：项目元信息与索引统计
 - `GET /api/graph`：完整 CodeGraph（节点、`contains`/`imports`/`calls` 边、统计）
 - `GET /api/node?node_id=...`：单个节点及其直接关系
-- `GET /api/source?symbol_id=...`：按符号 ID 读取只读源码片段（受 Workspace 边界、文件大小和行数限制）
+- `GET /api/source?symbol_id=...&limit=...`：按符号 ID 读取只读源码片段（受 Workspace 边界、文件大小和行数限制；`limit` 最大 10000，源码工作台会请求完整符号窗口）
 - `POST /api/chat`：围绕当前符号的核心源码进行只读 AI 对话（只接收 `symbolId`，不接收任意文件路径）
 - `GET /api/children?parent_id=...`：某一层级的直接子节点
 - `GET /api/architecture/status`：LLM Provider 与架构缓存状态（不含 API Key；`cacheStatus` 为 `valid` / `stale` / `missing`）

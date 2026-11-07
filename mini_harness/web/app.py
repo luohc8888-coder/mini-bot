@@ -39,7 +39,8 @@ from mini_harness.workspace import (
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 
-_MAX_SOURCE_LINES = 400
+_DEFAULT_SOURCE_LINES = 400
+_MAX_SOURCE_LINES = 10_000
 _MAX_SOURCE_BYTES = 512 * 1024
 _MAX_CHAT_SOURCE_CHARS = 30_000
 
@@ -118,12 +119,15 @@ def _source_payload(
     workspace: Workspace,
     graph: CodeGraph,
     symbol_id: str,
+    *,
+    max_lines: int = _DEFAULT_SOURCE_LINES,
 ) -> dict[str, object]:
     """按符号 ID 读取 Workspace 内的只读源码片段。
 
     只接受 CodeGraph 中真实存在的 symbol_id，不接收任意前端文件路径；
-    返回值限制为符号行范围，并限制文件大小与返回行数，避免把整个文件
-    或 Workspace 外内容暴露给浏览器。
+    返回值限制为符号行范围，并受单文件字节上限保护，避免把整个文件
+    或 Workspace 外内容暴露给浏览器。调用方可以通过 ``max_lines``
+    请求更大的源码窗口，前端完整源码视图使用该能力。
     """
     symbol = graph.get_node(symbol_id)
     if symbol is None:
@@ -176,7 +180,7 @@ def _source_payload(
         truncated = False
     else:
         start_line = symbol_start
-        end_line = min(symbol_end, start_line + _MAX_SOURCE_LINES - 1)
+        end_line = min(symbol_end, start_line + max_lines - 1)
         truncated = end_line < symbol_end
         returned_lines = [
             {
@@ -442,9 +446,22 @@ def create_app(
         return _node_payload(graph, node_id)
 
     @app.get("/api/source")
-    def source(symbol_id: str = Query(...)) -> dict[str, object]:
+    def source(
+        symbol_id: str = Query(...),
+        limit: int = Query(
+            default=_DEFAULT_SOURCE_LINES,
+            ge=1,
+            le=_MAX_SOURCE_LINES,
+            description="返回的最大源码行数；源码工作台请求完整符号窗口",
+        ),
+    ) -> dict[str, object]:
         """按符号 ID 返回只读源码片段，用于运行架构的源码追溯。"""
-        return _source_payload(resolved, graph, symbol_id)
+        return _source_payload(
+            resolved,
+            graph,
+            symbol_id,
+            max_lines=limit,
+        )
 
     @app.post("/api/chat")
     async def chat_source(request: ChatRequest) -> dict[str, object]:
@@ -464,7 +481,12 @@ def create_app(
             )
 
         source_payload = (
-            _source_payload(resolved, graph, request.symbol_id)
+            _source_payload(
+                resolved,
+                graph,
+                request.symbol_id,
+                max_lines=_MAX_SOURCE_LINES,
+            )
             if request.symbol_id
             else None
         )

@@ -120,10 +120,14 @@ export function fetchSourceSnippet(
   symbolId: string,
   signal?: AbortSignal,
 ): Promise<SourceSnippet> {
-  return requestJson<SourceSnippet>(
-    `/api/source?symbol_id=${encodeURIComponent(symbolId)}`,
-    { signal },
-  );
+  const query = new URLSearchParams({
+    symbol_id: symbolId,
+    // 源码工作台展示完整符号范围，不再被默认的 400 行窗口截断。
+    limit: "10000",
+  });
+  return requestJson<SourceSnippet>(`/api/source?${query.toString()}`, {
+    signal,
+  });
 }
 
 export function fetchChatReply(
