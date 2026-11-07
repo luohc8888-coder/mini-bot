@@ -23,7 +23,10 @@ import {
   type RuntimeFlowNode,
   type RuntimeNodeData,
 } from "../architecture/layout";
-import type { ArchitectureView } from "../types/architecture";
+import type {
+  ArchitectureSourceRef,
+  ArchitectureView,
+} from "../types/architecture";
 
 const nodeTypes: NodeTypes = {
   runtime: RuntimeArchitectureNode,
@@ -51,6 +54,7 @@ interface RuntimeCanvasProps {
   onNodeClick: (nodeId: string) => void;
   onNodeDoubleClick: (nodeId: string) => void;
   onNestedClick: (detailView: string) => void;
+  onSourceOpen: (source: ArchitectureSourceRef) => void;
   onPaneClick: () => void;
 }
 
@@ -62,6 +66,7 @@ export function RuntimeCanvas({
   onNodeClick,
   onNodeDoubleClick,
   onNestedClick,
+  onSourceOpen,
   onPaneClick,
 }: RuntimeCanvasProps) {
   const [flowNodes, setFlowNodes, onNodesChange] =
@@ -85,6 +90,7 @@ export function RuntimeCanvas({
     void layoutRuntimeView(view, {
       mock: graphMock,
       onNestedClick,
+      onSourceOpen,
     }).then((result) => {
       if (cancelled) {
         return;
@@ -103,7 +109,7 @@ export function RuntimeCanvas({
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view, graphMock, onNestedClick, setFlowNodes, fitView]);
+  }, [view, graphMock, onNestedClick, onSourceOpen, setFlowNodes, fitView]);
 
   useEffect(() => {
     setFlowEdges(

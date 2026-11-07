@@ -4,6 +4,7 @@ import type {
   ArchitectureGraph,
   ArchitectureNode,
   ArchitectureNodeKind,
+  ArchitectureSourceRef,
   ArchitectureView,
 } from "../types/architecture";
 
@@ -15,8 +16,10 @@ export interface RuntimeNodeData extends Record<string, unknown> {
   meta: string;
   detailView?: string;
   nested: NonNullable<ArchitectureNode["nested"]>;
+  sourceRefs: ArchitectureSourceRef[];
   mock: boolean;
   onNestedClick?: (detailView: string) => void;
+  onSourceOpen?: (source: ArchitectureSourceRef) => void;
 }
 
 export type RuntimeFlowNode = Node<RuntimeNodeData, "runtime">;
@@ -93,6 +96,7 @@ export function buildRuntimeFlowNode(
   node: ArchitectureNode,
   mock: boolean,
   onNestedClick: (detailView: string) => void,
+  onSourceOpen?: (source: ArchitectureSourceRef) => void,
 ): RuntimeFlowNode {
   const size = runtimeNodeSize(node);
   return {
@@ -107,8 +111,10 @@ export function buildRuntimeFlowNode(
       meta: node.meta ?? "",
       detailView: node.detailView,
       nested: node.nested ?? [],
+      sourceRefs: node.sourceRefs ?? [],
       mock,
       onNestedClick,
+      onSourceOpen,
     },
     style: {
       width: size.width,
@@ -127,13 +133,14 @@ export function buildRuntimeFlowNodes(
   view: ArchitectureView,
   mock: boolean,
   onNestedClick: (detailView: string) => void,
+  onSourceOpen?: (source: ArchitectureSourceRef) => void,
 ): RuntimeFlowNode[] {
   const columnCount =
     view.nodes.length <= 4 ? 2 : view.nodes.length <= 9 ? 3 : 4;
   const cellWidth = 440;
   const cellHeight = 300;
   return view.nodes.map((node, index) => ({
-    ...buildRuntimeFlowNode(node, mock, onNestedClick),
+    ...buildRuntimeFlowNode(node, mock, onNestedClick, onSourceOpen),
     position: node.position ?? {
       x: (index % columnCount) * cellWidth,
       y: Math.floor(index / columnCount) * cellHeight,

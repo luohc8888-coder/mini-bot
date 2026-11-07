@@ -234,9 +234,9 @@ export function RuntimeInspector({
                         type="button"
                         className="source-ref__open"
                         onClick={() => onSourceSelect(source)}
-                        title="在画布底部查看源码"
+                        title="打开全屏源码工作台"
                       >
-                        查看源码
+                        查看核心源码
                       </button>
                     ) : null}
                   </div>

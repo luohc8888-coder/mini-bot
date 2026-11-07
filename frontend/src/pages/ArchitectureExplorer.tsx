@@ -4,7 +4,8 @@ import { AppHeader, type ArchitectureBadgeMode } from "../components/AppHeader";
 import { Breadcrumb } from "../components/Breadcrumb";
 import { RuntimeCanvas } from "../components/RuntimeCanvas";
 import { RuntimeInspector } from "../components/RuntimeInspector";
-import { SourcePreviewDrawer } from "../components/SourcePreviewDrawer";
+import { SourceChatPanel } from "../components/SourceChatPanel";
+import { SourceWorkspace } from "../components/SourceWorkspace";
 import {
   architectureErrorMessage,
   fetchArchitectureGraph,
@@ -39,6 +40,11 @@ interface ViewStackItem {
   label: string;
 }
 
+interface SourceGroup {
+  label: string;
+  refs: ArchitectureSourceRef[];
+}
+
 type AnalysisSource = "cache" | "generated";
 
 function buildRuntimeBreadcrumbs(stack: ViewStackItem[]): BreadcrumbItem[] {
@@ -49,6 +55,41 @@ function buildRuntimeBreadcrumbs(stack: ViewStackItem[]): BreadcrumbItem[] {
     isCurrent: index === stack.length - 1,
     clickable: index < stack.length - 1,
   }));
+}
+
+function sourceDisplayLabel(source: ArchitectureSourceRef): string {
+  if (source.symbolName) {
+    return source.symbolName;
+  }
+  if (source.qualifiedName) {
+    const parts = source.qualifiedName.split(".").filter(Boolean);
+    return parts[parts.length - 1] ?? source.qualifiedName;
+  }
+  return source.filePath ?? "核心源码";
+}
+
+function buildSourceBreadcrumbs(
+  items: BreadcrumbItem[],
+  source: ArchitectureSourceRef | null,
+): BreadcrumbItem[] {
+  if (!source) {
+    return items;
+  }
+  const base = items.map((item, index) => ({
+    ...item,
+    isCurrent: false,
+    clickable: item.clickable || index === items.length - 1,
+  }));
+  return [
+    ...base,
+    {
+      id: "source",
+      label: sourceDisplayLabel(source),
+      kind: "component",
+      isCurrent: true,
+      clickable: false,
+    },
+  ];
 }
 
 const EMPTY_BREADCRUMBS: BreadcrumbItem[] = [
@@ -72,6 +113,7 @@ export function ArchitectureExplorer({
   const [sourceRef, setSourceRef] = useState<ArchitectureSourceRef | null>(
     null,
   );
+  const [sourceGroup, setSourceGroup] = useState<SourceGroup | null>(null);
   const [relationMode, setRelationMode] = useState<RelationMode>("main");
   const [loading, setLoading] = useState(true);
   const [analyzing, setAnalyzing] = useState(false);
@@ -81,6 +123,43 @@ export function ArchitectureExplorer({
   const [staleCache, setStaleCache] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const startedRef = useRef(false);
+  const nodeClickTimerRef = useRef<number | null>(null);
+
+  const clearNodeClickTimer = useCallback(() => {
+    if (nodeClickTimerRef.current !== null) {
+      window.clearTimeout(nodeClickTimerRef.current);
+      nodeClickTimerRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => clearNodeClickTimer, [clearNodeClickTimer]);
+
+  const closeSource = useCallback(() => {
+    setSourceGroup(null);
+    setSourceRef(null);
+  }, []);
+
+  const openSourceGroup = useCallback(
+    (
+      refs: ArchitectureSourceRef[],
+      label: string,
+      activeSource?: ArchitectureSourceRef | null,
+    ) => {
+      const usable = refs.filter((source) => Boolean(source.symbolId));
+      if (usable.length === 0) {
+        return;
+      }
+      const selected =
+        (activeSource?.symbolId
+          ? usable.find(
+              (source) => source.symbolId === activeSource.symbolId,
+            )
+          : null) ?? usable[0];
+      setSourceGroup({ label, refs: usable });
+      setSourceRef(selected);
+    },
+    [],
+  );
 
   const applyGraph = useCallback((nextGraph: ArchitectureGraph) => {
     setGraph(nextGraph);
@@ -91,8 +170,8 @@ export function ArchitectureExplorer({
       },
     ]);
     setSelectedId(null);
-    setSourceRef(null);
-  }, []);
+    closeSource();
+  }, [closeSource]);
 
   const runGeneration = useCallback(
     async (force: boolean) => {
@@ -203,21 +282,37 @@ export function ArchitectureExplorer({
     graph && currentView
       ? findArchitectureNode(graph, currentView.id, selectedId)
       : null;
-  const breadcrumbs = useMemo(() => buildRuntimeBreadcrumbs(stack), [stack]);
+  const breadcrumbs = useMemo(
+    () => buildSourceBreadcrumbs(buildRuntimeBreadcrumbs(stack), sourceRef),
+    [stack, sourceRef],
+  );
   const visibleEdgeCount = currentView
     ? currentView.edges.filter((edge) => isEdgeVisible(edge, relationMode)).length
     : 0;
 
-  useEffect(() => {
-    setSourceRef(null);
-  }, [selectedId, current?.viewId]);
-
-  const handleSourceSelect = useCallback((source: ArchitectureSourceRef) => {
-    if (!source.symbolId) {
-      return;
-    }
-    setSourceRef(source);
-  }, []);
+  const handleSourceSelect = useCallback(
+    (source: ArchitectureSourceRef) => {
+      clearNodeClickTimer();
+      if (!source.symbolId) {
+        return;
+      }
+      const ownerNode =
+        graph && currentView
+          ? currentView.nodes.find((node) =>
+              (node.sourceRefs ?? []).some(
+                (ref) => ref.symbolId === source.symbolId,
+              ),
+            )
+          : null;
+      if (ownerNode) {
+        setSelectedId(ownerNode.id);
+        openSourceGroup(ownerNode.sourceRefs ?? [source], ownerNode.label, source);
+        return;
+      }
+      openSourceGroup([source], sourceDisplayLabel(source), source);
+    },
+    [currentView, graph, openSourceGroup, clearNodeClickTimer],
+  );
 
   const openView = (view: ArchitectureView, label: string) => {
     setStack((previous) => {
@@ -238,7 +333,24 @@ export function ArchitectureExplorer({
     if (!node) {
       return;
     }
+    clearNodeClickTimer();
     setSelectedId(node.id);
+    const sourceRefs = (node.sourceRefs ?? []).filter(
+      (source) => source.symbolId,
+    );
+    if (sourceRefs.length > 0) {
+      // 有下钻视图的节点仍保留双击下钻；单击稍等片刻再进入源码，
+      // 避免双击时第一下就被源码工作台拦截。
+      if (node.detailView) {
+        nodeClickTimerRef.current = window.setTimeout(() => {
+          nodeClickTimerRef.current = null;
+          openSourceGroup(sourceRefs, node.label, sourceRefs[0]);
+        }, 260);
+      } else {
+        openSourceGroup(sourceRefs, node.label, sourceRefs[0]);
+      }
+      return;
+    }
     if (
       relationMode === "main" &&
       currentView.edges.some(
@@ -252,6 +364,7 @@ export function ArchitectureExplorer({
   };
 
   const handleNodeDoubleClick = (nodeId: string) => {
+    clearNodeClickTimer();
     if (!graph || !currentView) {
       return;
     }
@@ -280,6 +393,8 @@ export function ArchitectureExplorer({
   );
 
   const handleBreadcrumb = (viewId: string | null) => {
+    clearNodeClickTimer();
+    closeSource();
     if (!viewId) {
       return;
     }
@@ -292,6 +407,11 @@ export function ArchitectureExplorer({
   };
 
   const handleBack = () => {
+    clearNodeClickTimer();
+    if (sourceRef || sourceGroup) {
+      closeSource();
+      return;
+    }
     if (stack.length <= 1) {
       return;
     }
@@ -330,24 +450,26 @@ export function ArchitectureExplorer({
         architectureMode={badgeMode}
       />
 
-      <main className="workspace">
+      <main
+        className={`workspace${sourceRef ? " workspace--source-mode" : ""}`}
+      >
         <section className="graph-column">
           <div className="graph-toolbar">
             <button
               type="button"
               className="back-button"
               onClick={handleBack}
-              disabled={stack.length <= 1}
-              title="返回上一级架构视图"
+              disabled={!sourceRef && stack.length <= 1}
+              title={sourceRef ? "返回架构图" : "返回上一级架构视图"}
             >
               <span aria-hidden="true">←</span>
-              返回
+              {sourceRef ? "返回架构" : "返回"}
             </button>
 
             <div className="toolbar-divider" aria-hidden="true" />
 
             <Breadcrumb
-              items={currentView ? breadcrumbs : EMPTY_BREADCRUMBS}
+              items={sourceRef || currentView ? breadcrumbs : EMPTY_BREADCRUMBS}
               onNavigate={handleBreadcrumb}
             />
 
@@ -356,20 +478,24 @@ export function ArchitectureExplorer({
             <div className="view-context">
               <span className="context-dot kind-runtime-architecture" />
               <span>
-                {currentView?.title ??
-                  (analyzing ? "AI 分析中" : "运行架构")}
+                {sourceRef
+                  ? sourceDisplayLabel(sourceRef)
+                  : currentView?.title ??
+                    (analyzing ? "AI 分析中" : "运行架构")}
               </span>
               <span className="view-context__kind">
-                {graph?.mock
-                  ? "Mock"
-                  : graph
-                    ? "LLM 架构"
-                    : status?.cacheStatus === "stale"
-                      ? "缓存已过期"
-                      : "等待生成"}
+                {sourceRef
+                  ? "核心源码"
+                  : graph?.mock
+                    ? "Mock"
+                    : graph
+                      ? "LLM 架构"
+                      : status?.cacheStatus === "stale"
+                        ? "缓存已过期"
+                        : "等待生成"}
               </span>
             </div>
-            {currentView ? (
+            {currentView && !sourceRef ? (
               <div className="relation-mode-switch" role="group" aria-label="关系显示模式">
                 <button
                   type="button"
@@ -409,25 +535,27 @@ export function ArchitectureExplorer({
                 </button>
               </div>
             ) : null}
-            {currentView ? (
+            {currentView && !sourceRef ? (
               <span className="view-stats">
                 {currentView.nodes.length} 节点 · {visibleEdgeCount}/
                 {currentView.edges.length} 关系
               </span>
             ) : null}
-            <button
-              type="button"
-              className="ghost-button architecture-regenerate"
-              onClick={() => void runGeneration(true)}
-              disabled={!status?.configured || analyzing}
-              title={
-                status?.configured
-                  ? "忽略缓存并重新调用 LLM 分析"
-                  : "尚未配置 LLM Provider"
-              }
-            >
-              {analyzing ? "分析中…" : "重新生成"}
-            </button>
+            {!sourceRef ? (
+              <button
+                type="button"
+                className="ghost-button architecture-regenerate"
+                onClick={() => void runGeneration(true)}
+                disabled={!status?.configured || analyzing}
+                title={
+                  status?.configured
+                    ? "忽略缓存并重新调用 LLM 分析"
+                    : "尚未配置 LLM Provider"
+                }
+              >
+                {analyzing ? "分析中…" : "重新生成"}
+              </button>
+            ) : null}
           </div>
 
           <div
@@ -508,18 +636,25 @@ export function ArchitectureExplorer({
                     onNodeClick={handleNodeClick}
                     onNodeDoubleClick={handleNodeDoubleClick}
                     onNestedClick={handleNestedClick}
+                    onSourceOpen={handleSourceSelect}
                     onPaneClick={() => {
+                      clearNodeClickTimer();
                       setSelectedId(null);
-                      setSourceRef(null);
+                      closeSource();
                     }}
                   />
                 </ReactFlowProvider>
 
-                {sourceRef ? (
-                  <SourcePreviewDrawer
-                    key={sourceRef.symbolId ?? sourceRef.filePath ?? "source-preview"}
-                    source={sourceRef}
-                    onClose={() => setSourceRef(null)}
+                {sourceRef && sourceGroup ? (
+                  <SourceWorkspace
+                    key={`${sourceGroup.label}:${sourceGroup.refs
+                      .map((ref) => ref.symbolId ?? ref.filePath ?? "")
+                      .join("|")}`}
+                    sources={sourceGroup.refs}
+                    activeSymbolId={sourceRef.symbolId ?? null}
+                    title={sourceGroup.label}
+                    onSelectSource={setSourceRef}
+                    onClose={closeSource}
                   />
                 ) : null}
 
@@ -576,7 +711,14 @@ export function ArchitectureExplorer({
           </div>
         </section>
 
-        {graph && currentView ? (
+        {sourceRef && sourceGroup ? (
+          <SourceChatPanel
+            key={sourceRef.symbolId ?? sourceRef.filePath ?? "source-chat"}
+            source={sourceRef}
+            nodeLabel={sourceGroup.label}
+            configured={Boolean(status?.configured)}
+          />
+        ) : graph && currentView ? (
           <RuntimeInspector
             node={selectedNode}
             view={currentView}
@@ -584,7 +726,7 @@ export function ArchitectureExplorer({
             selected={selectedId !== null}
             onClearSelection={() => setSelectedId(null)}
             onSourceSelect={handleSourceSelect}
-            activeSourceId={sourceRef?.symbolId ?? null}
+            activeSourceId={null}
             analysis={
               graph.mock
                 ? null

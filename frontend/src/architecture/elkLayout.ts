@@ -5,7 +5,10 @@ import type {
   ElkExtendedEdge,
   ElkNode,
 } from "elkjs/lib/elk-api";
-import type { ArchitectureView } from "../types/architecture";
+import type {
+  ArchitectureSourceRef,
+  ArchitectureView,
+} from "../types/architecture";
 import {
   buildRuntimeFlowNode,
   buildRuntimeFlowNodes,
@@ -54,6 +57,7 @@ async function getElk(): Promise<ElkInstance> {
 export interface RuntimeLayoutOptions {
   mock: boolean;
   onNestedClick: (detailView: string) => void;
+  onSourceOpen?: (source: ArchitectureSourceRef) => void;
 }
 
 export interface RuntimeLayoutResult {
@@ -67,7 +71,12 @@ function buildLegacyLayout(
   options: RuntimeLayoutOptions,
 ): RuntimeLayoutResult {
   return {
-    nodes: buildRuntimeFlowNodes(view, options.mock, options.onNestedClick),
+    nodes: buildRuntimeFlowNodes(
+      view,
+      options.mock,
+      options.onNestedClick,
+      options.onSourceOpen,
+    ),
     edgeRoutes: {},
     usedElk: false,
   };
@@ -113,6 +122,7 @@ function buildDagreFallback(
           node,
           options.mock,
           options.onNestedClick,
+          options.onSourceOpen,
         );
         return {
           ...flowNode,
@@ -242,6 +252,7 @@ export async function layoutRuntimeView(
       source ?? node,
       options.mock,
       options.onNestedClick,
+      options.onSourceOpen,
     );
     return {
       ...flowNode,

@@ -32,6 +32,19 @@ export interface ArchitectureAnalysisResponse {
   promptStats: Record<string, unknown>;
 }
 
+export interface ChatReply {
+  message: string;
+  provider: string;
+  model: string;
+  usage?: Record<string, unknown>;
+}
+
+export interface ChatRequest {
+  message: string;
+  symbolId?: string;
+  nodeLabel?: string;
+}
+
 export class ArchitectureApiError extends Error {
   readonly status: number;
   readonly issues: string[];
@@ -113,6 +126,20 @@ export function fetchSourceSnippet(
   );
 }
 
+export function fetchChatReply(
+  request: ChatRequest,
+  signal?: AbortSignal,
+): Promise<ChatReply> {
+  return requestJson<ChatReply>("/api/chat", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(request),
+    signal,
+  });
+}
+
 export async function generateArchitecture(
   force = false,
 ): Promise<ArchitectureAnalysisResponse> {
@@ -125,6 +152,9 @@ export async function generateArchitecture(
 
 export function architectureErrorMessage(error: unknown): string {
   if (error instanceof ArchitectureApiError) {
+    if (error.status === 405) {
+      return "当前后端尚未加载 AI 对话接口，请重启 mini-bot web 后重试。";
+    }
     if (error.issues.length > 0) {
       return `${error.message}：${error.issues.slice(0, 3).join("；")}`;
     }
