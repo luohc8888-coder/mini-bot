@@ -14,8 +14,11 @@ CodeGraph 只使用 Phase 2 已经确定的结构事实：
 from __future__ import annotations
 
 import builtins
+import posixpath
+import re
 from collections import defaultdict
 from dataclasses import dataclass, replace
+from pathlib import PurePosixPath
 from typing import Iterable
 
 from .models import (
@@ -28,7 +31,82 @@ GRAPH_SCHEMA_VERSION = 1
 
 _BUILTIN_NAMES = frozenset(
     name for name in dir(builtins) if not name.startswith("_")
+) | frozenset(
+    {
+        # TypeScript / Browser / JS 常见内建全局对象
+        "AbortController",
+        "Array",
+        "Boolean",
+        "DOMException",
+        "Date",
+        "Error",
+        "JSON",
+        "Map",
+        "Math",
+        "Number",
+        "Object",
+        "Promise",
+        "RegExp",
+        "Set",
+        "String",
+        "Symbol",
+        "URL",
+        "URLSearchParams",
+        "clearInterval",
+        "clearTimeout",
+        "console",
+        "document",
+        "encodeURIComponent",
+        "fetch",
+        "localStorage",
+        "navigator",
+        "parseFloat",
+        "parseInt",
+        "setInterval",
+        "setTimeout",
+        "window",
+        # Java 常见标准库类
+        "Arrays",
+        "Collections",
+        "Collectors",
+        "Double",
+        "Files",
+        "Float",
+        "IllegalArgumentException",
+        "IllegalStateException",
+        "Instant",
+        "Integer",
+        "List",
+        "LocalDate",
+        "LocalDateTime",
+        "Long",
+        "Objects",
+        "Optional",
+        "Paths",
+        "RuntimeException",
+        "Stream",
+        "StringBuilder",
+        "System",
+        "UUID",
+    }
 )
+
+_TS_PROBE_EXTENSIONS = (
+    ".ts",
+    ".tsx",
+    ".mts",
+    ".cts",
+    ".d.ts",
+    ".js",
+    ".jsx",
+    ".mjs",
+    ".cjs",
+)
+_TS_ASSET_EXTENSIONS = (".css", ".scss", ".less", ".svg", ".png", ".jpg", ".json")
+_FASTAPI_ROUTE_RE = re.compile(
+    r"\.(?:get|post|put|delete|patch|api_route)\(\s*['\"](/api/[^'\"?]+)['\"]"
+)
+_SPRING_ROUTE_PREFIX = "spring_route:"
 
 
 class CodeGraphError(ValueError):
@@ -315,6 +393,8 @@ class CodeGraphBuilder:
         )
         self.module_exports: dict[str, dict[str, SymbolRecord]] = defaultdict(dict)
         self.external_names_by_file: dict[str, set[str]] = defaultdict(set)
+        self.modules_by_package: dict[str, list[SymbolRecord]] = defaultdict(list)
+        self.api_route_handlers: dict[str, SymbolRecord] = {}
         self._unresolved: list[UnresolvedReference] = []
 
         for symbol in self.symbols:
@@ -329,6 +409,19 @@ class CodeGraphBuilder:
                 self.module_by_file.setdefault(symbol.file_path, symbol)
                 if symbol.name:
                     self.top_level_names.add(symbol.name.split(".", 1)[0])
+                    if symbol.language == "java" and "." in symbol.name:
+                        pkg = symbol.name.rsplit(".", 1)[0]
+                        self.modules_by_package[pkg].append(symbol)
+            for decorator in symbol.decorators:
+                if decorator.startswith(_SPRING_ROUTE_PREFIX):
+                    route = decorator[len(_SPRING_ROUTE_PREFIX) :].rstrip("/")
+                    if route:
+                        self.api_route_handlers.setdefault(route, symbol)
+                    continue
+                match = _FASTAPI_ROUTE_RE.search(decorator)
+                if match:
+                    route = match.group(1).rstrip("/")
+                    self.api_route_handlers.setdefault(route, symbol)
 
     def build(self) -> CodeGraph:
         """构建并返回 CodeGraph。"""
@@ -437,6 +530,16 @@ class CodeGraphBuilder:
                 else None
             )
             if target_module is None:
+                # Java 通配包导入：import com.example.common.*;
+                if record.name == "*" and target_name in self.modules_by_package:
+                    for pkg_mod in self.modules_by_package[target_name]:
+                        for export_name, bound in self.module_exports.get(
+                            pkg_mod.name, {}
+                        ).items():
+                            self.bound_symbols_by_file[record.file_path][
+                                export_name
+                            ] = bound
+                    continue
                 # 命名空间包可能没有 ``__init__.py`` 模块节点；
                 # ``from pkg import models`` 仍可落到 ``pkg.models``。
                 child = self._child_module(record, target_name)
@@ -459,8 +562,21 @@ class CodeGraphBuilder:
                     )
                 continue
 
+            if record.name == "default":
+                local_key = record.alias or target_module.name.rsplit(".", 1)[-1]
+                stem = PurePosixPath(target_module.file_path).stem
+                default_target = self.module_exports.get(target_name, {}).get(stem)
+                if default_target is None:
+                    children = self.children_by_parent.get(target_module.id, [])
+                    default_target = children[0] if children else target_module
+                self.bound_symbols_by_file[record.file_path][local_key] = default_target
+                continue
+
             if record.name == "*":
-                # from pkg import *：把目标模块已知导出名绑定到当前文件。
+                # from pkg import * / import * as ns from "./mod"
+                if record.alias:
+                    self.bindings_by_file[record.file_path][record.alias] = target_name
+                    continue
                 for export_name, bound in self.module_exports.get(
                     target_module.name, {}
                 ).items():
@@ -504,12 +620,31 @@ class CodeGraphBuilder:
             source = self.module_by_file.get(record.file_path)
             target_name = self._resolve_import_module_name(record)
             if source is None or target_name is None:
-                if source is not None and record.level > 0:
+                if (
+                    source is not None
+                    and record.level > 0
+                    and not _is_ignored_asset_import(record.module)
+                ):
                     self._add_unresolved_import(record, source)
                 continue
 
             target = self.modules_by_name.get(target_name)
             if target is None:
+                if record.name == "*" and target_name in self.modules_by_package:
+                    for pkg_mod in self.modules_by_package[target_name]:
+                        if pkg_mod.id == source.id:
+                            continue
+                        edge = GraphEdge(
+                            id=_edge_id("imports", source.id, pkg_mod.id),
+                            source=source.id,
+                            target=pkg_mod.id,
+                            kind="imports",
+                            confidence="static",
+                            line=record.line,
+                            detail=_import_expression(record),
+                        )
+                        _add_edge(edge_map, edge)
+                    continue
                 child = self._child_module(record, target_name)
                 if child is not None:
                     target = child
@@ -589,6 +724,15 @@ class CodeGraphBuilder:
         name = callee_name.strip()
         if not name:
             return None, "unresolved"
+
+        # 跨端静态 HTTP API 桥接：前端 fetch("/api/...") -> 后端 FastAPI 路由处理函数
+        if name.startswith("http_api:"):
+            route = name[len("http_api:") :].rstrip("/")
+            handler = self.api_route_handlers.get(route)
+            if handler is not None:
+                return handler, "static"
+            return None, "unresolved"
+
         parts = name.split(".")
         first = parts[0]
 
@@ -608,7 +752,7 @@ class CodeGraphBuilder:
                 return target, "static"
             return None, "unresolved"
 
-        if first in ("self", "cls"):
+        if first in ("self", "cls", "this"):
             class_symbol = self._enclosing_class(caller)
             if class_symbol is not None and len(parts) > 1:
                 candidate = f"{class_symbol.qualified_name}.{'.'.join(parts[1:])}"
@@ -646,6 +790,24 @@ class CodeGraphBuilder:
                 if len(parts) == 1:
                     return child, "static"
                 candidate = f"{child.qualified_name}.{'.'.join(parts[1:])}"
+                target = self.by_qualified.get(candidate)
+                if target is not None:
+                    return target, "static"
+
+        # Java 同包类隐式可见（无需显式 import）
+        if (
+            caller.language == "java"
+            and module is not None
+            and "." in module.name
+        ):
+            pkg = module.name.rsplit(".", 1)[0]
+            for pkg_mod in self.modules_by_package.get(pkg, []):
+                exported = self.module_exports.get(pkg_mod.name, {}).get(first)
+                if exported is None:
+                    continue
+                if len(parts) == 1:
+                    return exported, "static"
+                candidate = f"{exported.qualified_name}.{'.'.join(parts[1:])}"
                 target = self.by_qualified.get(candidate)
                 if target is not None:
                     return target, "static"
@@ -694,7 +856,9 @@ class CodeGraphBuilder:
         self,
         record: ImportRecord,
     ) -> str | None:
-        """把 import record 解析成项目内模块名。"""
+        """把 import record 解析成项目内模块名（兼容 Python 与 TypeScript 相对路径）。"""
+        if record.module.startswith("."):
+            return self._resolve_ts_relative_import(record)
         if record.level == 0:
             return record.module or None
 
@@ -703,6 +867,38 @@ class CodeGraphBuilder:
             return None
         package = _package_for_module(source)
         return _relative_module_name(package, record.level, record.module)
+
+    def _resolve_ts_relative_import(self, record: ImportRecord) -> str | None:
+        """解析 TypeScript 的 ``./foo`` / ``../bar`` 相对路径到已索引模块。"""
+        specifier = record.module.strip()
+        if not specifier or _is_ignored_asset_import(specifier):
+            return None
+        base_dir = PurePosixPath(record.file_path).parent.as_posix()
+        joined = (
+            specifier if base_dir in ("", ".") else f"{base_dir}/{specifier}"
+        )
+        normalized = posixpath.normpath(joined)
+        if normalized.startswith("../") or normalized == "..":
+            return None
+
+        candidates = [normalized]
+        # 兼容 TS ESM 写法 import "./foo.js" 实际指向 foo.ts / foo.tsx
+        if normalized.endswith(".js"):
+            stem = normalized[:-3]
+            candidates.extend(f"{stem}{ext}" for ext in _TS_PROBE_EXTENSIONS)
+        else:
+            candidates.extend(
+                f"{normalized}{ext}" for ext in _TS_PROBE_EXTENSIONS
+            )
+            candidates.extend(
+                f"{normalized}/index{ext}" for ext in _TS_PROBE_EXTENSIONS
+            )
+
+        for candidate in candidates:
+            target = self.module_by_file.get(candidate)
+            if target is not None:
+                return target.name
+        return None
 
     def _looks_internal(self, module_name: str) -> bool:
         """判断缺失模块是否看起来属于当前项目。"""
@@ -727,6 +923,11 @@ class CodeGraphBuilder:
                 line=record.line,
             )
         )
+
+
+def _is_ignored_asset_import(specifier: str) -> bool:
+    lower = specifier.lower()
+    return any(lower.endswith(ext) for ext in _TS_ASSET_EXTENSIONS)
 
 
 def _package_for_module(module: SymbolRecord) -> str:

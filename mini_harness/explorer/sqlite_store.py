@@ -53,7 +53,7 @@ from .scanner import (
 )
 from .store import DEFAULT_INDEX_ROOT
 
-SQLITE_SCHEMA_VERSION = 2
+SQLITE_SCHEMA_VERSION = 4
 
 _MAX_SNIPPET_LINES = 10
 _MAX_SNIPPET_CHARS = 600
@@ -515,7 +515,6 @@ class SQLiteIndexStore:
                     prev is not None
                     and prev[0] == stat.st_size
                     and prev[1] == stat.st_mtime_ns
-                    and prev[3] == "ok"
                 ):
                     unchanged += 1
                     continue
@@ -769,7 +768,21 @@ class SQLiteIndexStore:
             # 同文件多样性重排：非单文件过滤时，避免同一个文件里的 module/class/config/result
             # 连续霸榜挤掉跨文件关联核心模块（如 dream.py 挤掉 store.py / scheduler.py）。
             single_file_scope = bool(
-                path_prefix and path_prefix.strip().endswith(".py")
+                path_prefix
+                and path_prefix.strip().endswith(
+                    (
+                        ".py",
+                        ".ts",
+                        ".tsx",
+                        ".mts",
+                        ".cts",
+                        ".js",
+                        ".jsx",
+                        ".mjs",
+                        ".cjs",
+                        ".java",
+                    )
+                )
             )
             if not single_file_scope:
                 diversified: list[tuple[float, int, tuple[Any, ...], int]] = []

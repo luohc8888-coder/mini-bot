@@ -386,6 +386,25 @@ def main() -> None:
     args = parser.parse_args()
 
     real_full = _bench_full_scan(ROOT)
+    # 统计多语言覆盖与跨端 API 桥接（Phase 2 指标）
+    real_ws = WorkspaceResolver(cwd=ROOT).resolve(ROOT)
+    real_idx = scan_project(real_ws)
+    real_graph = build_code_graph(real_idx)
+    lang_files: dict[str, int] = {}
+    for rec in real_idx.files:
+        lang_files[rec.language] = lang_files.get(rec.language, 0) + 1
+    api_bridges = [
+        f"{real_graph.get_node(e.source).qualified_name} -> "
+        f"{real_graph.get_node(e.target).qualified_name} ({e.detail})"
+        for e in real_graph.edges
+        if e.kind == "calls"
+        and real_graph.get_node(e.source) is not None
+        and real_graph.get_node(e.target) is not None
+        and real_graph.get_node(e.source).language == "typescript"
+        and real_graph.get_node(e.target).language == "python"
+    ]
+    real_full["files_by_language"] = lang_files
+    real_full["fullstack_api_bridges"] = len(api_bridges)
     real_sqlite = _bench_sqlite_incremental(
         ROOT,
         mutate_file=None,  # 不修改真实仓库文件；在临时副本测单文件修改

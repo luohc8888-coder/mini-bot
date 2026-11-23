@@ -25,6 +25,12 @@ from mini_harness.workspace import (
 
 from .ast_parser import PythonAstParser
 from .base import LanguageAdapter
+from .java_parser import TREE_SITTER_JAVA_AVAILABLE, JavaTreeSitterParser
+from .ts_parser import (
+    TREE_SITTER_TS_AVAILABLE,
+    JavaScriptTreeSitterParser,
+    TypeScriptTreeSitterParser,
+)
 from .models import (
     DiagnosticRecord,
     FileRecord,
@@ -75,11 +81,39 @@ def _decode_source(raw: bytes) -> str:
         raise ValueError(f"无法解码源码：{exc}") from exc
 
 
+def default_language_adapters() -> list[LanguageAdapter]:
+    """返回默认启用的多语言适配器列表（Python + TS/JS + Java）。"""
+    adapters: list[LanguageAdapter] = [PythonAstParser()]
+    if TREE_SITTER_TS_AVAILABLE:
+        adapters.append(TypeScriptTreeSitterParser())
+        adapters.append(JavaScriptTreeSitterParser())
+    if TREE_SITTER_JAVA_AVAILABLE:
+        adapters.append(JavaTreeSitterParser())
+    return adapters
+
+
+def _is_generated_asset(path: Path, workspace_root: Path) -> bool:
+    """跳过打包压缩产物（如 *.min.js、*.bundled-*.js、Vite 同步的 static/assets）。"""
+    name = path.name.lower()
+    if name.endswith((".min.js", ".min.mjs", ".min.cjs", ".bundle.js")):
+        return True
+    if ".bundled-" in name and name.endswith(".js"):
+        return True
+    try:
+        parts = path.relative_to(workspace_root).parts
+    except ValueError:
+        return False
+    for idx in range(len(parts) - 1):
+        if parts[idx] == "static" and parts[idx + 1] == "assets":
+            return True
+    return False
+
+
 class ProjectScanner:
     """扫描 Workspace 并生成语言无关的 ``ProjectIndex``。
 
-    默认注册 Python AST 适配器。后续扩展 Java/C++/TypeScript 时，传入额外
-    ``LanguageAdapter`` 即可；扫描器本身无需修改。
+    默认注册 Python AST 与 TypeScript/TSX Tree-sitter 适配器。后续扩展
+    Java/Go/Rust 时，传入额外 ``LanguageAdapter`` 即可；扫描器本身无需修改。
     """
 
     def __init__(
@@ -93,7 +127,11 @@ class ProjectScanner:
         if max_file_bytes <= 0:
             raise ValueError("max_file_bytes 必须大于 0")
         self.workspace = workspace
-        self.adapters = list(adapters) if adapters is not None else [PythonAstParser()]
+        self.adapters = (
+            list(adapters)
+            if adapters is not None
+            else default_language_adapters()
+        )
         if not self.adapters:
             raise ValueError("至少需要注册一个 LanguageAdapter")
         self.ignore_dirs = set(
@@ -128,6 +166,8 @@ class ProjectScanner:
             ]
             for filename in sorted(filenames):
                 path = root / filename
+                if _is_generated_asset(path, self.workspace.path):
+                    continue
                 if self.adapter_for(path) is not None:
                     yield path
 
@@ -383,5 +423,6 @@ __all__ = [
     "DEFAULT_IGNORE_DIRS",
     "DEFAULT_MAX_FILE_BYTES",
     "ProjectScanner",
+    "default_language_adapters",
     "scan_project",
 ]

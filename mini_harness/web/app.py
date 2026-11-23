@@ -275,8 +275,9 @@ def _chat_system_prompt(
         source_header += f"\n签名：{signature}"
     if docstring:
         source_header += f"\n文档字符串：{docstring}"
+    language = str(source_payload.get("language") or "text")
     sections.append(source_header)
-    sections.append(f"```python\n{source_text}\n```")
+    sections.append(f"```{language}\n{source_text}\n```")
     return "\n\n".join(sections)
 
 
