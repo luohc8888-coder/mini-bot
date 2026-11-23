@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from mini_harness.architecture import ArchitectureCache
 from mini_harness.explorer import build_code_graph, scan_project
-from mini_harness.providers.base import LLMResponse
+from mini_harness.providers.base import LLMResponse, ToolCallRequest
 from mini_harness.providers.mock import MockProvider
 from mini_harness.web import create_app
 
@@ -130,3 +130,107 @@ def test_chat_forwards_multi_turn_history(tmp_path: Path) -> None:
     assert sent[1]["content"] == "这个函数做什么？"
     assert sent[2]["content"] == "它是程序入口。"
     assert sent[3]["content"] == "它具体调用了什么？"
+
+
+def test_chat_stream_runs_readonly_agent_with_tool_and_sse_events(
+    tmp_path: Path,
+) -> None:
+    root, frontend = _project(tmp_path)
+    (root / "helper.py").write_text(
+        "def greet(name: str) -> str:\n"
+        '    """返回问候语。"""\n'
+        "    return f'hi {name}'\n",
+        encoding="utf-8",
+    )
+    (root / "main.py").write_text(
+        "from helper import greet\n\n"
+        "def main() -> str:\n"
+        '    """程序入口。"""\n'
+        "    return greet('world')\n",
+        encoding="utf-8",
+    )
+    symbol_id = _main_symbol_id(root)
+
+    provider = MockProvider(
+        [
+            LLMResponse(
+                content=None,
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call_graph_1",
+                        name="query_code_graph",
+                        arguments={"symbol": symbol_id},
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(
+                content="main 在 L5 调用了 `helper.py:1` 中的 `greet`。",
+                finish_reason="stop",
+            ),
+        ]
+    )
+    app = create_app(
+        root,
+        frontend_dir=frontend,
+        architecture_provider=provider,
+        architecture_cache=ArchitectureCache(tmp_path / "cache.json"),
+        index_db_path=tmp_path / "index.db",
+    )
+
+    # 安全不变量：Web Agent 工具集必须严格只读
+    tool_names = set(app.state.readonly_tools.tool_names)
+    assert "query_code_graph" in tool_names
+    assert "search_code" in tool_names
+    assert "read_file" in tool_names
+    assert not (
+        tool_names & {"write_file", "edit_file", "apply_patch", "run_command"}
+    )
+
+    with TestClient(app) as client:
+        with client.stream(
+            "POST",
+            "/api/chat/stream",
+            json={
+                "message": "它下游调用了哪个函数？",
+                "symbolId": symbol_id,
+                "nodeLabel": "Main",
+            },
+        ) as resp:
+            assert resp.status_code == 200
+            assert "text/event-stream" in resp.headers["content-type"]
+            body = "".join(resp.iter_text())
+
+    assert "event: tool" in body
+    assert '"name": "query_code_graph"' in body
+    assert "event: delta" in body
+    assert "event: done" in body
+    assert "helper.py:1" in body
+    assert '"toolsUsed": ["query_code_graph"]' in body
+
+
+def test_symbol_by_path_resolves_enclosing_symbol_and_blocks_escape(
+    tmp_path: Path,
+) -> None:
+    root, frontend = _project(tmp_path)
+    app = create_app(
+        root,
+        frontend_dir=frontend,
+        index_db_path=tmp_path / "index.db",
+    )
+    with TestClient(app) as client:
+        ok = client.get(
+            "/api/symbol-by-path",
+            params={"file_path": "main.py", "line": 2},
+        )
+        assert ok.status_code == 200
+        payload = ok.json()
+        assert payload["symbolName"] == "main"
+        assert payload["kind"] == "function"
+        assert payload["filePath"] == "main.py"
+
+        bad = client.get(
+            "/api/symbol-by-path",
+            params={"file_path": "../../etc/passwd", "line": 1},
+        )
+        assert bad.status_code == 400

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   architectureErrorMessage,
   fetchSourceSnippet,
@@ -8,10 +8,17 @@ import type {
   SourceSnippet,
 } from "../types/architecture";
 
+export interface SourceHighlightRange {
+  start: number;
+  end: number;
+  key: number;
+}
+
 interface SourceWorkspaceProps {
   sources: ArchitectureSourceRef[];
   activeSymbolId: string | null;
   title?: string;
+  highlightRange?: SourceHighlightRange | null;
   onSelectSource: (source: ArchitectureSourceRef) => void;
   onLocateInStructure?: (symbolId: string) => void;
   onClose: () => void;
@@ -39,10 +46,12 @@ export function SourceWorkspace({
   sources,
   activeSymbolId,
   title: titleOverride,
+  highlightRange,
   onSelectSource,
   onLocateInStructure,
   onClose,
 }: SourceWorkspaceProps) {
+  const codeContainerRef = useRef<HTMLDivElement | null>(null);
   const usableSources = useMemo(
     () => sources.filter((source) => Boolean(source.symbolId)),
     [sources],
@@ -115,6 +124,16 @@ export function SourceWorkspace({
       window.removeEventListener("keydown", handleKeyDown);
     };
   }, [onClose]);
+
+  useEffect(() => {
+    if (!highlightRange || !snippet || !codeContainerRef.current) {
+      return;
+    }
+    const targetEl = codeContainerRef.current.querySelector<HTMLElement>(
+      `[data-line-number="${highlightRange.start}"]`,
+    );
+    targetEl?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [highlightRange, snippet]);
 
   const title =
     titleOverride ??
@@ -279,20 +298,31 @@ export function SourceWorkspace({
           <span>{error}</span>
         </div>
       ) : snippet && snippet.lines.length > 0 ? (
-        <div className="source-drawer__code source-workspace__code">
-          {snippet.lines.map((line) => (
-            <div
-              key={line.number}
-              className={`source-drawer__line${
-                line.number === snippet.symbolStartLine
-                  ? " source-drawer__line--symbol-start"
-                  : ""
-              }`}
-            >
-              <span className="source-drawer__line-number">{line.number}</span>
-              <code>{line.text || " "}</code>
-            </div>
-          ))}
+        <div
+          ref={codeContainerRef}
+          className="source-drawer__code source-workspace__code"
+        >
+          {snippet.lines.map((line) => {
+            const isHighlighted = Boolean(
+              highlightRange &&
+                line.number >= highlightRange.start &&
+                line.number <= highlightRange.end,
+            );
+            return (
+              <div
+                key={line.number}
+                data-line-number={line.number}
+                className={`source-drawer__line${
+                  line.number === snippet.symbolStartLine
+                    ? " source-drawer__line--symbol-start"
+                    : ""
+                }${isHighlighted ? " source-drawer__line--highlighted" : ""}`}
+              >
+                <span className="source-drawer__line-number">{line.number}</span>
+                <code>{line.text || " "}</code>
+              </div>
+            );
+          })}
         </div>
       ) : (
         <div className="source-drawer__status source-workspace__status">

@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   architectureErrorMessage,
-  fetchChatReply,
+  streamChatReply,
   type ChatHistoryItem,
 } from "../architecture/api";
 import type { ArchitectureSourceRef } from "../types/architecture";
@@ -10,6 +10,12 @@ interface SourceChatPanelProps {
   source: ArchitectureSourceRef;
   nodeLabel?: string;
   configured: boolean;
+  onJumpToLine?: (startLine: number, endLine: number) => void;
+  onJumpToFileLine?: (
+    filePath: string,
+    startLine: number,
+    endLine: number,
+  ) => void;
 }
 
 interface ChatMessage {
@@ -19,13 +25,32 @@ interface ChatMessage {
   pending?: boolean;
   error?: boolean;
   welcome?: boolean;
+  toolsUsed?: string[];
+  ttftMs?: number;
+  durationMs?: number;
+}
+
+interface AnchorCallbacks {
+  onJumpToLine?: (startLine: number, endLine: number) => void;
+  onJumpToFileLine?: (
+    filePath: string,
+    startLine: number,
+    endLine: number,
+  ) => void;
 }
 
 const QUICK_PROMPTS = [
-  "总结核心职责与入参/返回值",
-  "梳理关键执行步骤与分支条件",
+  "总结核心职责与关键行号",
+  "追踪上下游调用链（callers / callees）",
   "分析潜在边界问题或风险点",
 ];
+
+// 匹配行内代码、加粗文本、跨文件路径:行号 与 当前文件 L行号 锚点
+const INLINE_TOKEN_RE =
+  /(`[^`]+`|\*\*[^*]+\*\*|(?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+\.(?:py|tsx?|jsx?|mjs|cjs|java):[0-9]+(?:-[0-9]+)?|\bL[0-9]+(?:-L?[0-9]+)?\b)/g;
+const FILE_LINE_RE =
+  /^((?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+\.(?:py|tsx?|jsx?|mjs|cjs|java)):([0-9]+)(?:-([0-9]+))?$/;
+const LINE_ONLY_RE = /^L([0-9]+)(?:-L?([0-9]+))?$/;
 
 // 按 symbolId 在当前页面会话内缓存聊天记录，切换 Tab 或重开时不丢失上下文。
 const chatCache = new Map<string, ChatMessage[]>();
@@ -52,35 +77,95 @@ function createWelcomeMessage(label: string): ChatMessage {
   return {
     id: "welcome",
     role: "assistant",
-    content: `已载入 \`${label}\`。可以问我这段源码的职责、关键流程或潜在风险，支持连续追问。`,
+    content: `已载入 \`${label}\`（只读 Agent 模式）。支持流式回答、跨文件追踪调用链，点击回答中的行号或 \`文件:行号\` 可直接高亮跳转源码。`,
     welcome: true,
   };
 }
 
-function renderInlineMarkdown(text: string): ReactNode[] {
-  const tokens = text.split(/(`[^`]+`|\*\*[^*]+\*\*)/g);
+function tryRenderAnchor(
+  rawText: string,
+  key: number | string,
+  callbacks: AnchorCallbacks,
+): ReactNode | null {
+  const fileMatch = rawText.match(FILE_LINE_RE);
+  if (fileMatch && callbacks.onJumpToFileLine) {
+    const filePath = fileMatch[1];
+    const start = Number.parseInt(fileMatch[2], 10);
+    const end = fileMatch[3] ? Number.parseInt(fileMatch[3], 10) : start;
+    return (
+      <button
+        key={key}
+        type="button"
+        className="chat-anchor chat-anchor--file"
+        onClick={() => callbacks.onJumpToFileLine?.(filePath, start, end)}
+        title={`跳转到 ${filePath} 第 ${start} 行`}
+      >
+        {rawText}
+      </button>
+    );
+  }
+  const lineMatch = rawText.match(LINE_ONLY_RE);
+  if (lineMatch && callbacks.onJumpToLine) {
+    const start = Number.parseInt(lineMatch[1], 10);
+    const end = lineMatch[2] ? Number.parseInt(lineMatch[2], 10) : start;
+    return (
+      <button
+        key={key}
+        type="button"
+        className="chat-anchor"
+        onClick={() => callbacks.onJumpToLine?.(start, end)}
+        title={`滚动并高亮第 ${start}${end > start ? `-${end}` : ""} 行`}
+      >
+        {rawText}
+      </button>
+    );
+  }
+  return null;
+}
+
+function renderInlineMarkdown(
+  text: string,
+  callbacks: AnchorCallbacks,
+): ReactNode[] {
+  const tokens = text.split(INLINE_TOKEN_RE);
   return tokens.map((token, index) => {
+    if (!token) {
+      return null;
+    }
     if (token.startsWith("`") && token.endsWith("`") && token.length > 2) {
+      const inner = token.slice(1, -1);
+      const anchor = tryRenderAnchor(inner, index, callbacks);
+      if (anchor) {
+        return anchor;
+      }
       return (
         <code key={index} className="chat-md__inline-code">
-          {token.slice(1, -1)}
+          {inner}
         </code>
       );
     }
     if (token.startsWith("**") && token.endsWith("**") && token.length > 4) {
       return <strong key={index}>{token.slice(2, -2)}</strong>;
     }
+    const directAnchor = tryRenderAnchor(token, index, callbacks);
+    if (directAnchor) {
+      return directAnchor;
+    }
     return <Fragment key={index}>{token}</Fragment>;
   });
 }
 
-function renderMarkdownBlocks(content: string): ReactNode {
+function renderMarkdownBlocks(
+  content: string,
+  callbacks: AnchorCallbacks,
+): ReactNode {
   const segments = content.split(/(```[\s\S]*?```)/g);
   return segments.map((segment, segIndex) => {
     if (segment.startsWith("```") && segment.endsWith("```")) {
       const inner = segment.slice(3, -3).replace(/^\n/, "");
       const newlineIndex = inner.indexOf("\n");
-      const firstLine = newlineIndex >= 0 ? inner.slice(0, newlineIndex).trim() : "";
+      const firstLine =
+        newlineIndex >= 0 ? inner.slice(0, newlineIndex).trim() : "";
       const hasLang = /^[a-zA-Z0-9_-]{1,20}$/.test(firstLine);
       const code = hasLang ? inner.slice(newlineIndex + 1) : inner;
       return (
@@ -101,7 +186,7 @@ function renderMarkdownBlocks(content: string): ReactNode {
       blocks.push(
         <ul key={`ul-${keyPrefix}`} className="chat-md__list">
           {listItems.map((item, idx) => (
-            <li key={idx}>{renderInlineMarkdown(item)}</li>
+            <li key={idx}>{renderInlineMarkdown(item, callbacks)}</li>
           ))}
         </ul>,
       );
@@ -125,14 +210,14 @@ function renderMarkdownBlocks(content: string): ReactNode {
       if (headingMatch) {
         blocks.push(
           <div key={`h-${segIndex}-${lineIndex}`} className="chat-md__heading">
-            {renderInlineMarkdown(headingMatch[2])}
+            {renderInlineMarkdown(headingMatch[2], callbacks)}
           </div>,
         );
         return;
       }
       blocks.push(
         <p key={`p-${segIndex}-${lineIndex}`} className="chat-md__p">
-          {renderInlineMarkdown(line)}
+          {renderInlineMarkdown(line, callbacks)}
         </p>,
       );
     });
@@ -146,6 +231,8 @@ export function SourceChatPanel({
   source,
   nodeLabel,
   configured,
+  onJumpToLine,
+  onJumpToFileLine,
 }: SourceChatPanelProps) {
   const label = sourceLabel(source);
   const range = formatRange(source.startLine, source.endLine);
@@ -174,7 +261,6 @@ export function SourceChatPanel({
   }, [cacheKey, label]);
 
   useEffect(() => {
-    // 只缓存非 pending 的稳定消息，避免切走后留下闪烁占位气泡。
     const stable = messages.filter((item) => !item.pending);
     if (stable.length > 0) {
       chatCache.set(cacheKey, stable);
@@ -186,6 +272,7 @@ export function SourceChatPanel({
   }, [messages]);
 
   const hasConversation = messages.some((item) => !item.welcome);
+  const anchorCallbacks: AnchorCallbacks = { onJumpToLine, onJumpToFileLine };
 
   const handleClear = () => {
     abortRef.current?.abort();
@@ -205,7 +292,7 @@ export function SourceChatPanel({
         item.pending
           ? {
               ...item,
-              content: "已停止生成。",
+              content: item.content ? `${item.content}\n\n（已停止生成）` : "已停止生成。",
               pending: false,
             }
           : item,
@@ -236,31 +323,69 @@ export function SourceChatPanel({
     setMessages((current) => [
       ...current,
       { id: userId, role: "user", content: message },
-      { id: pendingId, role: "assistant", content: "", pending: true },
+      {
+        id: pendingId,
+        role: "assistant",
+        content: "",
+        pending: true,
+        toolsUsed: [],
+      },
     ]);
 
     const controller = new AbortController();
     abortRef.current = controller;
 
     try {
-      const reply = await fetchChatReply(
+      await streamChatReply(
         {
           message,
           symbolId: source.symbolId,
           nodeLabel,
           history,
         },
+        {
+          onTool: (toolName) => {
+            setMessages((current) =>
+              current.map((item) =>
+                item.id === pendingId
+                  ? {
+                      ...item,
+                      toolsUsed: [...(item.toolsUsed ?? []), toolName],
+                    }
+                  : item,
+              ),
+            );
+          },
+          onDelta: (chunk) => {
+            setMessages((current) =>
+              current.map((item) =>
+                item.id === pendingId
+                  ? { ...item, content: item.content + chunk }
+                  : item,
+              ),
+            );
+          },
+          onDone: (payload) => {
+            setMessages((current) =>
+              current.map((item) =>
+                item.id === pendingId
+                  ? {
+                      ...item,
+                      content: payload.message || item.content || "模型没有返回文本回答。",
+                      pending: false,
+                      toolsUsed:
+                        payload.toolsUsed.length > 0
+                          ? payload.toolsUsed
+                          : item.toolsUsed,
+                      ttftMs: payload.ttftMs,
+                      durationMs: payload.durationMs,
+                    }
+                  : item,
+              ),
+            );
+          },
+        },
         controller.signal,
-      );
-      if (controller.signal.aborted) {
-        return;
-      }
-      setMessages((current) =>
-        current.map((item) =>
-          item.id === pendingId
-            ? { ...item, content: reply.message, pending: false }
-            : item,
-        ),
       );
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") {
@@ -290,7 +415,7 @@ export function SourceChatPanel({
     <aside className="source-chat" aria-label="AI 源码对话">
       <header className="source-chat__header">
         <div>
-          <div className="eyebrow">AI CODE CHAT</div>
+          <div className="eyebrow">AI AGENT CHAT · SSE</div>
           <h2 className="source-chat__title">和这段源码对话</h2>
         </div>
         <div className="source-chat__header-actions">
@@ -308,7 +433,7 @@ export function SourceChatPanel({
             className={`source-chat__status${configured ? " is-ready" : ""}`}
           >
             <i aria-hidden="true" />
-            {configured ? "AI READY" : "AI 未配置"}
+            {configured ? "AGENT READY" : "AI 未配置"}
           </span>
         </div>
       </header>
@@ -357,19 +482,48 @@ export function SourceChatPanel({
               </span>
             ) : null}
             <div className="source-chat__bubble">
+              {message.toolsUsed && message.toolsUsed.length > 0 ? (
+                <div className="source-chat__tools" aria-label="Agent 调用的只读工具">
+                  {message.toolsUsed.map((tool, idx) => (
+                    <span
+                      key={`${tool}-${idx}`}
+                      className="source-chat__tool-pill"
+                    >
+                      ⚙ {tool}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+
+              {message.content ? (
+                message.role === "assistant" && !message.error ? (
+                  <div className="chat-md">
+                    {renderMarkdownBlocks(message.content, anchorCallbacks)}
+                  </div>
+                ) : (
+                  message.content
+                )
+              ) : null}
+
               {message.pending ? (
                 <span className="source-chat__typing" aria-label="AI 正在思考">
                   <i />
                   <i />
                   <i />
                 </span>
-              ) : message.role === "assistant" && !message.error ? (
-                <div className="chat-md">
-                  {renderMarkdownBlocks(message.content)}
+              ) : null}
+
+              {!message.pending &&
+              !message.welcome &&
+              !message.error &&
+              message.role === "assistant" &&
+              (message.ttftMs || message.durationMs) ? (
+                <div className="source-chat__meta">
+                  {message.ttftMs ? `首字 ${message.ttftMs}ms` : ""}
+                  {message.ttftMs && message.durationMs ? " · " : ""}
+                  {message.durationMs ? `总计 ${(message.durationMs / 1000).toFixed(1)}s` : ""}
                 </div>
-              ) : (
-                message.content
-              )}
+              ) : null}
             </div>
           </div>
         ))}
@@ -399,7 +553,7 @@ export function SourceChatPanel({
           }}
           placeholder={
             configured
-              ? "询问这段源码的职责、流程或风险…"
+              ? "可追问当前源码或跨文件调用链…"
               : "当前没有可用的 AI Provider"
           }
           aria-label="输入源码问题"
@@ -430,7 +584,7 @@ export function SourceChatPanel({
         </div>
       </form>
       <p className="source-chat__hint">
-        支持多轮追问 · 仅发送当前符号源码片段 · 不执行代码
+        只读 Agent（可调用 CodeGraph/FTS5 跨文件检索）· 严禁修改项目文件
       </p>
     </aside>
   );

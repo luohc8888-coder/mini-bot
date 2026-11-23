@@ -1,5 +1,6 @@
 import type {
   ArchitectureGraph,
+  ArchitectureSourceRef,
   SourceSnippet,
 } from "../types/architecture";
 
@@ -149,6 +150,170 @@ export function fetchChatReply(
     body: JSON.stringify(request),
     signal,
   });
+}
+
+export interface StreamChatDoneEvent {
+  message: string;
+  toolsUsed: string[];
+  stopReason: string;
+  streamed: boolean;
+  provider: string;
+  model: string;
+  ttftMs: number;
+  durationMs: number;
+}
+
+export interface StreamChatCallbacks {
+  onDelta: (text: string) => void;
+  onTool: (toolName: string) => void;
+  onDone: (payload: StreamChatDoneEvent) => void;
+}
+
+export async function streamChatReply(
+  request: ChatRequest,
+  callbacks: StreamChatCallbacks,
+  signal?: AbortSignal,
+): Promise<void> {
+  let response: Response;
+  try {
+    response = await fetch("/api/chat/stream", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "text/event-stream",
+      },
+      body: JSON.stringify(request),
+      signal,
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw error;
+    }
+    throw new ArchitectureApiError(
+      `无法连接本地 Web 服务：${error instanceof Error ? error.message : String(error)}`,
+      0,
+    );
+  }
+
+  // 兼容旧版未提供流式接口的后端，自动回退到 /api/chat
+  if (response.status === 404 || response.status === 405) {
+    const reply = await fetchChatReply(request, signal);
+    callbacks.onDone({
+      message: reply.message,
+      toolsUsed: [],
+      stopReason: "completed",
+      streamed: false,
+      provider: reply.provider,
+      model: reply.model,
+      ttftMs: 0,
+      durationMs: 0,
+    });
+    return;
+  }
+
+  if (!response.ok) {
+    throw await readError(response);
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw new ArchitectureApiError("浏览器不支持流式响应读取。", 0);
+  }
+
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+  let completed = false;
+
+  const dispatchFrame = (rawFrame: string) => {
+    const lines = rawFrame.split(/\r?\n/);
+    let eventName = "message";
+    const dataLines: string[] = [];
+    for (const line of lines) {
+      if (line.startsWith("event:")) {
+        eventName = line.slice(6).trim();
+      } else if (line.startsWith("data:")) {
+        dataLines.push(line.slice(5).trimStart());
+      }
+    }
+    if (dataLines.length === 0) {
+      return;
+    }
+    const rawData = dataLines.join("\n");
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(rawData) as Record<string, unknown>;
+    } catch {
+      return;
+    }
+    if (eventName === "delta" && typeof parsed.text === "string") {
+      callbacks.onDelta(parsed.text);
+    } else if (eventName === "tool" && typeof parsed.name === "string") {
+      callbacks.onTool(parsed.name);
+    } else if (eventName === "error") {
+      throw new ArchitectureApiError(
+        typeof parsed.detail === "string" ? parsed.detail : "流式对话失败。",
+        502,
+      );
+    } else if (eventName === "done") {
+      completed = true;
+      callbacks.onDone({
+        message: typeof parsed.message === "string" ? parsed.message : "",
+        toolsUsed: Array.isArray(parsed.toolsUsed)
+          ? parsed.toolsUsed.filter((item): item is string => typeof item === "string")
+          : [],
+        stopReason: typeof parsed.stopReason === "string" ? parsed.stopReason : "completed",
+        streamed: Boolean(parsed.streamed),
+        provider: typeof parsed.provider === "string" ? parsed.provider : "",
+        model: typeof parsed.model === "string" ? parsed.model : "",
+        ttftMs: typeof parsed.ttftMs === "number" ? parsed.ttftMs : 0,
+        durationMs: typeof parsed.durationMs === "number" ? parsed.durationMs : 0,
+      });
+    }
+  };
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) {
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      let sepIndex = buffer.indexOf("\n\n");
+      while (sepIndex >= 0) {
+        const frame = buffer.slice(0, sepIndex).trim();
+        buffer = buffer.slice(sepIndex + 2);
+        if (frame) {
+          dispatchFrame(frame);
+        }
+        sepIndex = buffer.indexOf("\n\n");
+      }
+    }
+    const trailing = (buffer + decoder.decode()).trim();
+    if (trailing) {
+      dispatchFrame(trailing);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  if (!completed && !signal?.aborted) {
+    throw new ArchitectureApiError("流式连接提前中断，未收到完整结束信号。", 0);
+  }
+}
+
+export function resolveSymbolByPath(
+  filePath: string,
+  line?: number,
+  signal?: AbortSignal,
+): Promise<ArchitectureSourceRef> {
+  const query = new URLSearchParams({ file_path: filePath });
+  if (line && line >= 1) {
+    query.set("line", String(line));
+  }
+  return requestJson<ArchitectureSourceRef>(
+    `/api/symbol-by-path?${query.toString()}`,
+    { signal },
+  );
 }
 
 export async function generateArchitecture(

@@ -5,12 +5,16 @@ import { Breadcrumb } from "../components/Breadcrumb";
 import { RuntimeCanvas } from "../components/RuntimeCanvas";
 import { RuntimeInspector } from "../components/RuntimeInspector";
 import { SourceChatPanel } from "../components/SourceChatPanel";
-import { SourceWorkspace } from "../components/SourceWorkspace";
+import {
+  SourceWorkspace,
+  type SourceHighlightRange,
+} from "../components/SourceWorkspace";
 import {
   architectureErrorMessage,
   fetchArchitectureGraph,
   fetchArchitectureStatus,
   generateArchitecture,
+  resolveSymbolByPath,
   type ArchitectureStatus,
 } from "../architecture/api";
 import {
@@ -122,6 +126,8 @@ export function ArchitectureExplorer({
     null,
   );
   const [sourceGroup, setSourceGroup] = useState<SourceGroup | null>(null);
+  const [highlightRange, setHighlightRange] =
+    useState<SourceHighlightRange | null>(null);
   const [relationMode, setRelationMode] = useState<RelationMode>("main");
   const [loading, setLoading] = useState(true);
   const [analyzing, setAnalyzing] = useState(false);
@@ -135,7 +141,56 @@ export function ArchitectureExplorer({
   const closeSource = useCallback(() => {
     setSourceGroup(null);
     setSourceRef(null);
+    setHighlightRange(null);
   }, []);
+
+  const handleJumpToLine = useCallback((start: number, end: number) => {
+    setHighlightRange({
+      start,
+      end: Math.max(start, end),
+      key: Date.now(),
+    });
+  }, []);
+
+  const handleJumpToFileLine = useCallback(
+    (filePath: string, start: number, end: number) => {
+      if (sourceRef?.filePath === filePath) {
+        setHighlightRange({
+          start,
+          end: Math.max(start, end),
+          key: Date.now(),
+        });
+        return;
+      }
+      void resolveSymbolByPath(filePath, start)
+        .then((target) => {
+          if (!target.symbolId) {
+            return;
+          }
+          setSourceGroup((current) => {
+            if (!current) {
+              return { label: target.symbolName ?? filePath, refs: [target] };
+            }
+            const exists = current.refs.some(
+              (item) => item.symbolId === target.symbolId,
+            );
+            return exists
+              ? current
+              : { ...current, refs: [...current.refs, target] };
+          });
+          setSourceRef(target);
+          setHighlightRange({
+            start,
+            end: Math.max(start, end),
+            key: Date.now(),
+          });
+        })
+        .catch(() => {
+          // 未索引文件静默忽略，保持当前源码视图稳定
+        });
+    },
+    [sourceRef?.filePath],
+  );
 
   const openSourceGroup = useCallback(
     (
@@ -631,7 +686,11 @@ export function ArchitectureExplorer({
                     sources={sourceGroup.refs}
                     activeSymbolId={sourceRef.symbolId ?? null}
                     title={sourceGroup.label}
-                    onSelectSource={setSourceRef}
+                    highlightRange={highlightRange}
+                    onSelectSource={(next) => {
+                      setSourceRef(next);
+                      setHighlightRange(null);
+                    }}
                     onLocateInStructure={onLocateInStructure}
                     onClose={closeSource}
                   />
@@ -695,6 +754,8 @@ export function ArchitectureExplorer({
             source={sourceRef}
             nodeLabel={sourceGroup.label}
             configured={Boolean(status?.configured)}
+            onJumpToLine={handleJumpToLine}
+            onJumpToFileLine={handleJumpToFileLine}
           />
         ) : graph && currentView ? (
           <RuntimeInspector

@@ -4009,3 +4009,78 @@ textarea:focus-visible {
 [data-theme="light"] .chat-md__inline-code {
   background: rgba(59, 111, 212, 0.1);
 }
+
+/* === Phase 3: SSE Agent Traces & Clickable Source Anchors === */
+
+.source-drawer__line--highlighted {
+  background: color-mix(in srgb, var(--accent) 22%, transparent) !important;
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.source-drawer__line--highlighted .source-drawer__line-number {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.source-chat__tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-bottom: 8px;
+}
+
+.source-chat__tool-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border: 1px solid color-mix(in srgb, var(--green) 36%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--green) 11%, transparent);
+  color: var(--green);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.source-chat__meta {
+  margin-top: 7px;
+  padding-top: 5px;
+  border-top: 1px dashed var(--border);
+  color: var(--muted-2);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+}
+
+.chat-anchor {
+  display: inline-flex;
+  align-items: center;
+  margin: 0 2px;
+  padding: 1px 6px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1.45;
+  vertical-align: baseline;
+  transition: background 140ms ease, border-color 140ms ease;
+}
+
+.chat-anchor:hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 26%, transparent);
+}
+
+.chat-anchor--file {
+  border-color: color-mix(in srgb, var(--purple) 45%, transparent);
+  background: color-mix(in srgb, var(--purple) 14%, transparent);
+  color: var(--purple);
+}
+
+.chat-anchor--file:hover {
+  border-color: var(--purple);
+  background: color-mix(in srgb, var(--purple) 26%, transparent);
+}

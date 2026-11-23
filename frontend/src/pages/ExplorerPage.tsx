@@ -6,8 +6,12 @@ import { GraphCanvas } from "../components/GraphCanvas";
 import { InspectorPanel } from "../components/InspectorPanel";
 import { QuickSearchModal } from "../components/QuickSearchModal";
 import { SourceChatPanel } from "../components/SourceChatPanel";
-import { SourceWorkspace } from "../components/SourceWorkspace";
+import {
+  SourceWorkspace,
+  type SourceHighlightRange,
+} from "../components/SourceWorkspace";
 import { ArchitectureExplorer } from "./ArchitectureExplorer";
+import { resolveSymbolByPath } from "../architecture/api";
 import { fetchExplorerData } from "../graph/api";
 import {
   buildGraphData,
@@ -59,6 +63,11 @@ export function ExplorerPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [structureSource, setStructureSource] =
     useState<ArchitectureSourceRef | null>(null);
+  const [structureSourceTabs, setStructureSourceTabs] = useState<
+    ArchitectureSourceRef[]
+  >([]);
+  const [structureHighlight, setStructureHighlight] =
+    useState<SourceHighlightRange | null>(null);
   const [viewMode, setViewMode] = useState<ExplorerViewMode>("architecture");
   const [searchOpen, setSearchOpen] = useState(false);
   const [aiConfigured, setAiConfigured] = useState(false);
@@ -119,13 +128,63 @@ export function ExplorerPage() {
     if (node.synthetic) {
       return;
     }
+    const ref = nodeToSourceRef(node);
     setSelectedId(node.id);
-    setStructureSource(nodeToSourceRef(node));
+    setStructureSource(ref);
+    setStructureSourceTabs([ref]);
+    setStructureHighlight(null);
   }, []);
 
   const closeStructureSource = useCallback(() => {
     setStructureSource(null);
+    setStructureSourceTabs([]);
+    setStructureHighlight(null);
   }, []);
+
+  const handleStructureJumpToLine = useCallback(
+    (start: number, end: number) => {
+      setStructureHighlight({
+        start,
+        end: Math.max(start, end),
+        key: Date.now(),
+      });
+    },
+    [],
+  );
+
+  const handleStructureJumpToFileLine = useCallback(
+    (filePath: string, start: number, end: number) => {
+      if (structureSource?.filePath === filePath) {
+        setStructureHighlight({
+          start,
+          end: Math.max(start, end),
+          key: Date.now(),
+        });
+        return;
+      }
+      void resolveSymbolByPath(filePath, start)
+        .then((target) => {
+          if (!target.symbolId) {
+            return;
+          }
+          setStructureSourceTabs((current) =>
+            current.some((item) => item.symbolId === target.symbolId)
+              ? current
+              : [...current, target],
+          );
+          setStructureSource(target);
+          setStructureHighlight({
+            start,
+            end: Math.max(start, end),
+            key: Date.now(),
+          });
+        })
+        .catch(() => {
+          // 未索引文件静默忽略
+        });
+    },
+    [structureSource?.filePath],
+  );
 
   const handleDrillDown = useCallback(
     (nodeId: string) => {
@@ -178,9 +237,14 @@ export function ExplorerPage() {
       setContainerId(target.parentId ?? null);
       setSelectedId(target.id);
       if (openSource && !target.synthetic) {
-        setStructureSource(nodeToSourceRef(target));
+        const ref = nodeToSourceRef(target);
+        setStructureSource(ref);
+        setStructureSourceTabs([ref]);
+        setStructureHighlight(null);
       } else {
         setStructureSource(null);
+        setStructureSourceTabs([]);
+        setStructureHighlight(null);
       }
     },
     [index],
@@ -384,10 +448,18 @@ export function ExplorerPage() {
 
                   {structureSource ? (
                     <SourceWorkspace
-                      sources={[structureSource]}
+                      sources={
+                        structureSourceTabs.length > 0
+                          ? structureSourceTabs
+                          : [structureSource]
+                      }
                       activeSymbolId={structureSource.symbolId ?? null}
                       title={structureSource.symbolName ?? "核心源码"}
-                      onSelectSource={setStructureSource}
+                      highlightRange={structureHighlight}
+                      onSelectSource={(next) => {
+                        setStructureSource(next);
+                        setStructureHighlight(null);
+                      }}
                       onClose={closeStructureSource}
                     />
                   ) : null}
@@ -435,6 +507,8 @@ export function ExplorerPage() {
                   source={structureSource}
                   nodeLabel={structureSource.symbolName}
                   configured={aiConfigured}
+                  onJumpToLine={handleStructureJumpToLine}
+                  onJumpToFileLine={handleStructureJumpToFileLine}
                 />
               ) : (
                 <InspectorPanel
