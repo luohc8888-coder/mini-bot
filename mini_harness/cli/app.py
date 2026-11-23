@@ -33,6 +33,7 @@ from mini_harness.tools import (
     ListDirTool,
     ReadFileTool,
     RunCommandTool,
+    SearchCodeTool,
     ToolRegistry,
     WriteFileTool,
 )
@@ -151,6 +152,7 @@ class InteractiveCLI(ProviderSettingsMixin, MemoryMaintenanceMixin):
 
         # 文件工具必须绑定固定的 Workspace，不能读取进程 cwd。
         file_workspace = WorkspaceResolver().resolve(self.workspace)
+        self.tools.register(SearchCodeTool(file_workspace))
         self.tools.register(FindFilesTool(file_workspace))
         self.tools.register(GrepTool(file_workspace))
         self.tools.register(ListDirTool(file_workspace))

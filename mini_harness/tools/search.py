@@ -310,8 +310,8 @@ class GrepTool(Tool):
 
     name = "grep"
     description = (
-        "在 Workspace 内的文本文件中搜索正则表达式。"
-        "返回文件路径、行号和命中行；适合定位类、函数或关键字后再读取文件。"
+        "在 Workspace 内的文本文件中做精确字符串或正则表达式搜索，返回文件路径、行号和命中行。"
+        "仅适合精确文本/正则匹配；按功能概念、中文描述或类/函数/调用链定位代码请优先使用 search_code。"
     )
     parameters = {
         "type": "object",

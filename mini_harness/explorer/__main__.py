@@ -17,6 +17,7 @@ from mini_harness.workspace import WorkspaceError, WorkspaceResolver
 
 from .codegraph import build_code_graph
 from .scanner import scan_project
+from .sqlite_store import SQLiteIndexStore
 from .store import IndexStore
 
 
@@ -36,6 +37,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--save",
         action="store_true",
         help="将索引保存到 ~/.mini-harness/explorer/<workspace_id>/index.json",
+    )
+    parser.add_argument(
+        "--sqlite",
+        action="store_true",
+        help="使用 SQLite WAL 增量索引同步到 ~/.mini-harness/explorer/<workspace_id>/index.db",
+    )
+    parser.add_argument(
+        "--search",
+        metavar="QUERY",
+        default=None,
+        help="执行 FTS5 + CodeGraph 混合检索并输出命中符号（隐含 --sqlite）。",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=8,
+        help="混合检索最多返回条数（默认 8）。",
     )
     parser.add_argument(
         "--json",
@@ -64,12 +82,42 @@ def main(argv: list[str] | None = None) -> int:
     except WorkspaceError as exc:
         parser.error(str(exc))
 
-    index = scan_project(workspace)
-    graph = (
-        build_code_graph(index)
-        if args.graph or args.graph_json
-        else None
-    )
+    if args.search is not None:
+        store = SQLiteIndexStore(workspace)
+        hits = store.search(args.search, limit=args.limit, auto_sync=True)
+        if args.json:
+            print(
+                json.dumps(
+                    [hit.to_dict() for hit in hits],
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 0
+        if not hits:
+            print(f"未找到与 {args.search!r} 匹配的符号。")
+            return 0
+        for idx, hit in enumerate(hits, start=1):
+            print(
+                f"{idx}. [{hit.kind}] {hit.qualified_name} "
+                f"({hit.file_path}:{hit.start_line}-{hit.end_line}) "
+                f"score={hit.score:.3f} in={hit.in_degree} out={hit.out_degree}"
+            )
+        return 0
+
+    sync_stats = None
+    if args.sqlite:
+        result = SQLiteIndexStore(workspace).sync()
+        index = result.index
+        graph = result.graph
+        sync_stats = result.stats
+    else:
+        index = scan_project(workspace)
+        graph = (
+            build_code_graph(index)
+            if args.graph or args.graph_json
+            else None
+        )
     if args.save:
         path = IndexStore(workspace).save(index)
         print(f"索引已保存：{path}", file=sys.stderr)
@@ -85,6 +133,15 @@ def main(argv: list[str] | None = None) -> int:
 
     stats = index.stats
     print(f"Workspace: {workspace.path}")
+    if sync_stats is not None:
+        print(
+            "SQLite 增量同步："
+            f"总计 {sync_stats.total_files} 文件，"
+            f"未变更 {sync_stats.unchanged_files}，"
+            f"重解析 {sync_stats.reparsed_files}，"
+            f"删除 {sync_stats.deleted_files}，"
+            f"耗时 {sync_stats.duration_ms:.2f} ms"
+        )
     print(
         "索引："
         f"{stats['indexedFiles']}/{stats['files']} 个文件，"

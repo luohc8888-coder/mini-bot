@@ -432,9 +432,9 @@ async def test_cli_context_command_shows_agents_and_trimming(
         workspace=workspace,
         data_root=data_root,
         context_config=ContextConfig(
-            # 新增 find_files/apply_patch 等工具 Schema 后，固定开销约 2.6K。
+            # 新增 find_files/apply_patch/search_code 等工具 Schema 后，固定开销约 2.9K。
             # 保留少量历史预算，继续验证选择与裁剪的实际行为。
-            max_context_tokens=3000,
+            max_context_tokens=3400,
             reserve_output_tokens=100,
         ),
     )

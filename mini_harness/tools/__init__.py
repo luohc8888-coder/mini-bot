@@ -1,6 +1,7 @@
 """工具包的公开接口。"""
 
 from .base import Tool, ToolResult
+from .code_search import SearchCodeTool
 from .command import RunCommandTool
 from .edit import ApplyPatchTool, EditFileTool
 from .filesystem import FileInfoTool, ReadFileTool, WriteFileTool
@@ -18,6 +19,7 @@ __all__ = [
     "ListDirTool",
     "ReadFileTool",
     "RunCommandTool",
+    "SearchCodeTool",
     "Tool",
     "ToolRegistry",
     "ToolResult",

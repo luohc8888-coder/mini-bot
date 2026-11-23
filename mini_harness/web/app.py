@@ -27,6 +27,8 @@ from mini_harness.architecture import (
 from mini_harness.explorer import (
     CodeGraph,
     ProjectIndex,
+    SQLiteIndexStore,
+    SyncStats,
     build_code_graph,
     scan_project,
 )
@@ -111,9 +113,11 @@ def _project_payload(
     workspace: Workspace,
     index: ProjectIndex,
     graph: CodeGraph,
+    *,
+    sync_stats: SyncStats | None = None,
 ) -> dict[str, object]:
     """构造前端首屏需要的项目元信息。"""
-    return {
+    payload: dict[str, object] = {
         "name": workspace.path.name,
         "root": str(workspace.path),
         "workspaceId": workspace.id,
@@ -123,6 +127,9 @@ def _project_payload(
         "stats": index.stats,
         "graphStats": graph.stats,
     }
+    if sync_stats is not None:
+        payload["syncStats"] = sync_stats.to_dict()
+    return payload
 
 
 def _source_payload(
@@ -301,6 +308,8 @@ def create_app(
     architecture_cache: ArchitectureCache | None = None,
     architecture_profile_name: str = "",
     architecture_provider_error: str = "",
+    index_db_path: Path | None = None,
+    use_sqlite_cache: bool = True,
 ) -> FastAPI:
     """创建绑定当前 Workspace 的 FastAPI 应用。
 
@@ -313,17 +322,33 @@ def create_app(
         architecture_cache: 可选的架构缓存路径/实例。
         architecture_profile_name: 状态接口展示的 profile 名。
         architecture_provider_error: Provider 不可用时的可读原因。
+        index_db_path: 可选的 SQLite 增量索引数据库路径。
+        use_sqlite_cache: 是否启用 SQLite WAL 增量索引与 FTS5 混合检索。
 
     Returns:
-        FastAPI 应用实例。索引与 CodeGraph 在应用创建时构建。
+        FastAPI 应用实例。索引与 CodeGraph 在应用创建时构建或增量同步。
     """
     resolved = (
         workspace
         if isinstance(workspace, Workspace)
         else WorkspaceResolver().resolve(workspace)
     )
-    index = scan_project(resolved)
-    graph = build_code_graph(index)
+    sqlite_store: SQLiteIndexStore | None = None
+    sync_stats: SyncStats | None = None
+    if use_sqlite_cache:
+        try:
+            sqlite_store = SQLiteIndexStore(resolved, db_path=index_db_path)
+            sync_result = sqlite_store.sync()
+            index = sync_result.index
+            graph = sync_result.graph
+            sync_stats = sync_result.stats
+        except Exception:  # noqa: BLE001 - 只读环境或 SQLite 不可用时降级为内存扫描
+            sqlite_store = None
+            index = scan_project(resolved)
+            graph = build_code_graph(index)
+    else:
+        index = scan_project(resolved)
+        graph = build_code_graph(index)
     frontend = _resolve_frontend_dir(frontend_dir)
 
     app = FastAPI(
@@ -355,6 +380,8 @@ def create_app(
     app.state.workspace = resolved
     app.state.index = index
     app.state.graph = graph
+    app.state.sqlite_store = sqlite_store
+    app.state.sync_stats = sync_stats
     app.state.frontend_dir = frontend
     app.state.architecture_service = architecture_service
     app.state.chat_provider = (
@@ -375,7 +402,45 @@ def create_app(
     @app.get("/api/project")
     def project() -> dict[str, object]:
         """返回当前 Workspace 与索引概览。"""
-        return _project_payload(resolved, index, graph)
+        return _project_payload(
+            resolved,
+            index,
+            graph,
+            sync_stats=sync_stats,
+        )
+
+    @app.get("/api/search")
+    def search_code(
+        q: str = Query(min_length=1, max_length=300, description="搜索关键词或概念"),
+        limit: int = Query(default=10, ge=1, le=50),
+        kind: str | None = Query(default=None),
+        path_prefix: str | None = Query(default=None),
+    ) -> dict[str, object]:
+        """基于 SQLite FTS5 + CodeGraph RRF 的混合代码检索接口。"""
+        if sqlite_store is None:
+            raise HTTPException(
+                status_code=503,
+                detail="SQLite 混合检索未启用或当前环境不可用。",
+            )
+        if path_prefix:
+            try:
+                resolved_prefix = resolved.resolve_path(path_prefix)
+                rel = resolved_prefix.relative_to(resolved.path).as_posix()
+                path_prefix = None if rel == "." else rel
+            except WorkspacePathError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        hits = sqlite_store.search(
+            q,
+            limit=limit,
+            kind=kind,
+            path_prefix=path_prefix,
+            auto_sync=False,
+        )
+        return {
+            "query": q,
+            "count": len(hits),
+            "hits": [hit.to_dict() for hit in hits],
+        }
 
     @app.get("/api/graph")
     def project_graph(

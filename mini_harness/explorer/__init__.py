@@ -28,6 +28,15 @@ from .scanner import (
     ProjectScanner,
     scan_project,
 )
+from .sqlite_store import (
+    SQLITE_SCHEMA_VERSION,
+    CodeSearchHit,
+    IncrementalSyncResult,
+    SQLiteIndexError,
+    SQLiteIndexStore,
+    SyncStats,
+    tokenize_for_fts,
+)
 from .store import DEFAULT_INDEX_ROOT, IndexStore, IndexStoreError
 
 __all__ = [
@@ -35,10 +44,16 @@ __all__ = [
     "DEFAULT_INDEX_ROOT",
     "DEFAULT_MAX_FILE_BYTES",
     "GRAPH_SCHEMA_VERSION",
+    "SQLITE_SCHEMA_VERSION",
     "CodeGraph",
     "CodeGraphBuilder",
     "CodeGraphError",
+    "CodeSearchHit",
     "GraphEdge",
+    "IncrementalSyncResult",
+    "SQLiteIndexError",
+    "SQLiteIndexStore",
+    "SyncStats",
     "UnresolvedReference",
     "build_code_graph",
     "SCHEMA_VERSION",
@@ -57,4 +72,5 @@ __all__ = [
     "SymbolRecord",
     "module_name_from_relative_path",
     "scan_project",
+    "tokenize_for_fts",
 ]

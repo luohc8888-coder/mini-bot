@@ -17,6 +17,7 @@ def test_system_prompt_contains_workspace_and_project_analysis_rules() -> None:
     assert "list_dir" in prompt
     assert "find_files" in prompt
     assert "grep" in prompt
+    assert "search_code" in prompt
     assert "write_file" in prompt
     assert "edit_file" in prompt
     assert "apply_patch" in prompt
