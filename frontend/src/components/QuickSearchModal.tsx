@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { MockNode, NodeKind } from "../types/graph";
+import type { GraphNode, NodeKind } from "../types/graph";
 
 const KIND_LABELS: Record<NodeKind, string> = {
   module: "模块",
@@ -10,9 +10,9 @@ const KIND_LABELS: Record<NodeKind, string> = {
 
 interface QuickSearchModalProps {
   open: boolean;
-  nodes: MockNode[];
+  nodes: GraphNode[];
   onClose: () => void;
-  onSelectSymbol: (node: MockNode, openSource: boolean) => void;
+  onSelectSymbol: (node: GraphNode, openSource: boolean) => void;
 }
 
 export function QuickSearchModal({
@@ -35,7 +35,7 @@ export function QuickSearchModal({
     if (!keyword) {
       return searchableNodes.slice(0, 16);
     }
-    const scored: { node: MockNode; score: number }[] = [];
+    const scored: { node: GraphNode; score: number }[] = [];
     for (const node of searchableNodes) {
       const label = node.label.toLowerCase();
       const qualified = (node.qualifiedName ?? "").toLowerCase();

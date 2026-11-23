@@ -46,7 +46,6 @@ export function RuntimeArchitectureNode({
           {KIND_ICONS[data.kind]}
         </span>
         <span className="runtime-node__kind">{data.kindLabel}</span>
-        {data.mock ? <span className="runtime-node__mock">MOCK</span> : null}
       </div>
 
       <div className="runtime-node__title">{data.label}</div>

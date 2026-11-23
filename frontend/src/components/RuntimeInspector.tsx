@@ -49,7 +49,6 @@ export function RuntimeInspector({
   activeSourceId,
   analysis,
 }: RuntimeInspectorProps) {
-  const isMock = graph.mock;
   const sourceRefs = node?.sourceRefs ?? [];
   const verifiedCount = sourceRefs.filter((source) => source.verified).length;
   const componentCount = view.nodes.filter(
@@ -87,9 +86,7 @@ export function RuntimeInspector({
               <span aria-hidden="true">{KIND_ICONS[node.kind]}</span>
               {KIND_LABELS[node.kind]}
             </span>
-            <span className={`soft-pill${isMock ? "" : " soft-pill--verified"}`}>
-              {isMock ? "Mock 组件" : "AI 组件"}
-            </span>
+            <span className="soft-pill soft-pill--verified">AI 组件</span>
             {selected ? <span className="soft-pill">已选中</span> : null}
           </div>
 
@@ -108,12 +105,8 @@ export function RuntimeInspector({
               <span>源码关联</span>
               <strong>
                 {sourceRefs.length > 0
-                  ? `${sourceRefs.length} 个符号引用${
-                      isMock ? "" : ` · ${verifiedCount} 已验证`
-                    }`
-                  : isMock
-                    ? "尚未关联源码，等待 Phase 4.3 校验"
-                    : "AI 未为该节点关联源码"}
+                  ? `${sourceRefs.length} 个符号引用 · ${verifiedCount} 已验证`
+                  : "AI 未为该节点关联源码"}
               </strong>
             </div>
           </div>
@@ -122,9 +115,7 @@ export function RuntimeInspector({
         <>
           <div className="inspector__badges">
             <span className="kind-pill kind-runtime-component">项目架构</span>
-            <span className={`soft-pill${isMock ? "" : " soft-pill--verified"}`}>
-              {isMock ? "Phase 4.1 Mock" : "Phase 4.3 LLM"}
-            </span>
+            <span className="soft-pill soft-pill--verified">LLM 语义架构</span>
           </div>
           <p className="inspector__summary">{graph.project.description}</p>
           <div className="project-stats">
@@ -162,7 +153,7 @@ export function RuntimeInspector({
         <section className="panel-section">
           <div className="panel-section__title">
             <span>组件职责</span>
-            <span className="section-tag">{isMock ? "Mock" : "LLM"}</span>
+            <span className="section-tag">LLM</span>
           </div>
           <ul className="responsibility-list">
             {(node.responsibilities ?? ["当前节点暂无职责描述。"]).map(
@@ -217,9 +208,7 @@ export function RuntimeInspector({
         <div className="panel-section__title">
           <span>源码关联</span>
           <span className="section-tag section-tag--warm">
-            {isMock
-              ? "Mock / 待校验"
-              : `${verifiedCount}/${sourceRefs.length} 已验证`}
+            {`${verifiedCount}/${sourceRefs.length} 已验证`}
           </span>
         </div>
         {sourceRefs.length > 0 ? (
@@ -283,11 +272,7 @@ export function RuntimeInspector({
         ) : (
           <div className="panel-empty">
             <span className="panel-empty__icon">⌘</span>
-            <p>
-              {isMock
-                ? "该逻辑节点当前没有源码引用。Phase 4.3 会通过 SymbolIndex 校验引用，无法静态确认的关系将标记为 inferred。"
-                : "该节点当前没有关联源码引用；架构关系仍可在上方画布中查看。"}
-            </p>
+            <p>该节点当前没有关联源码引用；架构关系仍可在上方画布中查看。</p>
           </div>
         )}
       </section>
@@ -295,52 +280,29 @@ export function RuntimeInspector({
       <section className="panel-section">
         <div className="panel-section__title">
           <span>AI 语义分析</span>
-          <span className="section-tag section-tag--warm">
-            {isMock ? "Phase 4.3" : "LLM 已生成"}
-          </span>
+          <span className="section-tag section-tag--warm">LLM 已生成</span>
         </div>
-        {isMock ? (
-          <div className="ai-reserved">
-            <div className="ai-reserved__intro">
-              <span className="ai-reserved__spark">✦</span>
-              <p>
-                当前是 Phase 4.1 的 Mock ArchitectureGraph，不会调用 LLM。
-                Phase 4.3 运行架构由结构化索引与按需源码窗口生成，并经过
-                SymbolIndex 校验。
-              </p>
-            </div>
+        <div className="ai-reserved ai-reserved--live">
+          <div className="ai-reserved__intro">
+            <span className="ai-reserved__spark">✦</span>
+            <p>
+              本图由 LLM 基于 AST/CodeGraph 结构化输入生成。源码引用已通过
+              SymbolIndex 校验；无法静态确认的关系标记为 inferred。
+            </p>
           </div>
-        ) : (
-          <div className="ai-reserved ai-reserved--live">
-            <div className="ai-reserved__intro">
-              <span className="ai-reserved__spark">✦</span>
-              <p>
-                本图由 LLM 基于 AST/CodeGraph 结构化输入生成。源码引用已通过
-                SymbolIndex 校验；无法静态确认的关系标记为 inferred。
-              </p>
-            </div>
-            <div className="prompt-chips">
-              <span>{analysis?.provider || "LLM Provider"}</span>
-              <span>{analysis?.model || "当前模型"}</span>
-              <span>
-                {analysis?.source === "cache" ? "缓存结果" : "本次生成"}
-              </span>
-            </div>
+          <div className="prompt-chips">
+            <span>{analysis?.provider || "LLM Provider"}</span>
+            <span>{analysis?.model || "当前模型"}</span>
+            <span>
+              {analysis?.source === "cache" ? "缓存结果" : "本次生成"}
+            </span>
           </div>
-        )}
+        </div>
       </section>
 
       <div className="inspector__footer">
-        <span
-          className={
-            isMock ? "status-dot status-dot--mock" : "status-dot status-dot--green"
-          }
-        />
-        <span>
-          {isMock
-            ? "Mock 架构图 · 只读原型 · 不修改目标项目"
-            : "AI 架构图 · SymbolIndex 校验 · 只读分析"}
-        </span>
+        <span className="status-dot status-dot--green" />
+        <span>AI 架构图 · SymbolIndex 校验 · 只读分析</span>
       </div>
     </aside>
   );

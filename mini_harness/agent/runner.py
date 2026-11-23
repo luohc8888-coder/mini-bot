@@ -113,7 +113,7 @@ class AgentRunner:
     """执行工具调用循环，但不感知 CLI、Session 或具体业务。
 
     Args:
-        provider: 实现了 LLMProvider.chat 的模型提供者；V0 使用 MockProvider。
+        provider: 实现了 LLMProvider.chat 的模型提供者
         tools: 工具注册表，负责导出工具定义并执行实际工具。
         context_config: 默认上下文预算配置。Runner 在每次 Provider 请求前
             使用 spec.context_config 或本配置执行治理；两者都为 None 时使用

@@ -18,7 +18,7 @@ import {
   type ArchitectureFlowNode,
   type ArchitectureNodeData,
 } from "../graph/layout";
-import type { MockEdge, MockNode, NodeKind } from "../types/graph";
+import type { GraphEdge, GraphNode, NodeKind } from "../types/graph";
 
 const nodeTypes: NodeTypes = {
   architecture: ArchitectureNode,
@@ -37,9 +37,9 @@ const FIT_VIEW_OPTIONS = {
 
 interface GraphCanvasProps {
   viewKey: string;
-  nodes: MockNode[];
-  edges: MockEdge[];
-  childrenByParent: Map<string | null, MockNode[]>;
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  childrenByParent: Map<string | null, GraphNode[]>;
   selectedId: string | null;
   onNodeClick: (nodeId: string) => void;
   onNodeDoubleClick: (nodeId: string) => void;

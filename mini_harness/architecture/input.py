@@ -22,6 +22,11 @@ from typing import Any
 
 from mini_harness.explorer import SCHEMA_VERSION, CodeGraph, GraphEdge, ProjectIndex, SymbolRecord
 
+from .communities import (
+    ArchitectureCommunity,
+    detect_architecture_communities,
+    is_noise_path,
+)
 from .source_refs import SOURCE_REFERENCE_PROTOCOL, SymbolIndex
 
 ARCHITECTURE_INPUT_SCHEMA_VERSION = 1
@@ -37,9 +42,22 @@ _DEFAULT_MAX_EXCERPT_CHARS = 12_000
 _DEFAULT_MAX_TOTAL_EXCERPT_CHARS = 48_000
 
 _ENTRY_NAMES = frozenset(
-    {"main", "run", "start", "serve", "server", "execute", "cli", "app", "loop"}
+    {
+        "main",
+        "run",
+        "start",
+        "serve",
+        "server",
+        "execute",
+        "cli",
+        "app",
+        "loop",
+        "create_app",
+    }
 )
-_ENTRY_FILE_STEMS = frozenset({"main", "__main__", "cli", "app", "server"})
+_ENTRY_FILE_STEMS = frozenset(
+    {"main", "__main__", "cli", "app", "server", "explorerpage"}
+)
 _COMPONENT_HINTS = frozenset(
     {
         "AgentLoop",
@@ -214,6 +232,7 @@ class ArchitectureAnalysisInput:
     unresolved_summary: dict[str, int]
     limits: dict[str, int]
     warnings: list[str] = field(default_factory=list)
+    communities: list[ArchitectureCommunity] = field(default_factory=list)
     schema_version: int = ARCHITECTURE_INPUT_SCHEMA_VERSION
 
     def to_dict(self) -> dict[str, Any]:
@@ -228,6 +247,7 @@ class ArchitectureAnalysisInput:
             "generatedAt": self.generated_at,
             "graphStats": dict(self.graph_stats),
             "stats": dict(self.graph_stats),
+            "communities": [item.to_dict() for item in self.communities],
             "entryPoints": [item.to_dict() for item in self.entry_points],
             "modules": [item.to_dict() for item in self.modules],
             "keySymbols": [item.to_dict() for item in self.key_symbols],
@@ -295,11 +315,21 @@ class ArchitectureInputBuilder:
     def build(self) -> ArchitectureAnalysisInput:
         """构建完整输入包；过程纯确定性，不发起任何模型调用。"""
         warnings: list[str] = []
+        self._has_production_code = any(
+            symbol.kind == "module" and not is_noise_path(symbol.file_path)
+            for symbol in self.graph.node_list
+        )
+        communities = detect_architecture_communities(self.graph)
         modules = self._select_modules()
         key_symbols = self._select_key_symbols()
+        key_ids = {item.id for item in key_symbols}
         entry_points = self._select_entry_points(key_symbols)
-        imports = self._select_relations("imports", self.max_import_relations)
-        calls = self._select_relations("calls", self.max_call_relations)
+        imports = self._select_relations(
+            "imports", self.max_import_relations, key_ids=key_ids
+        )
+        calls = self._select_relations(
+            "calls", self.max_call_relations, key_ids=key_ids
+        )
         source_excerpts = self._build_source_excerpts(
             self._excerpt_candidates(entry_points, key_symbols),
             warnings,
@@ -320,6 +350,12 @@ class ArchitectureInputBuilder:
             unresolved_summary=unresolved_summary,
             limits=self._limits(),
             warnings=warnings,
+            communities=communities,
+        )
+
+    def _is_filtered_noise(self, symbol: SymbolRecord) -> bool:
+        return getattr(self, "_has_production_code", False) and is_noise_path(
+            symbol.file_path
         )
 
     def _summary(self, symbol: SymbolRecord) -> ArchitectureSymbolSummary:
@@ -342,7 +378,7 @@ class ArchitectureInputBuilder:
         modules = [
             symbol
             for symbol in self.graph.node_list
-            if symbol.kind == "module"
+            if symbol.kind == "module" and not self._is_filtered_noise(symbol)
         ]
         modules.sort(key=lambda item: (item.file_path, item.start_line))
         return [self._summary(symbol) for symbol in modules[: self.max_modules]]
@@ -352,6 +388,7 @@ class ArchitectureInputBuilder:
             symbol
             for symbol in self.graph.node_list
             if symbol.kind in {"class", "function", "method"}
+            and not self._is_filtered_noise(symbol)
         ]
         ranked = sorted(
             candidates,
@@ -387,6 +424,8 @@ class ArchitectureInputBuilder:
         candidates: list[ArchitectureEntryPoint] = []
         for symbol in self.graph.node_list:
             if symbol.kind not in {"class", "function", "method"}:
+                continue
+            if self._is_filtered_noise(symbol):
                 continue
             score, reasons = self._entry_score(symbol)
             if score <= 0 or not reasons:
@@ -432,6 +471,9 @@ class ArchitectureInputBuilder:
         if symbol.kind == "function" and name == "main":
             score += 100
             reasons.append("顶层 main 函数")
+        if symbol.kind == "function" and name == "create_app":
+            score += 85
+            reasons.append("Web 应用工厂入口")
         if symbol.kind == "method" and name in {"run", "serve", "start", "loop"}:
             score += 45
             reasons.append(f"生命周期方法：{symbol.name}")
@@ -441,23 +483,38 @@ class ArchitectureInputBuilder:
         if "cli" in path_parts:
             score += 20
             reasons.append("CLI 目录")
+        if "web" in path_parts or "pages" in path_parts:
+            score += 15
+            reasons.append("Web / 前端页面目录")
         score += len(self.graph.get_incoming(symbol.id, kind="calls")) * 2
         return score, reasons
 
-    def _select_relations(self, kind: str, limit: int) -> list[ArchitectureRelationSummary]:
+    def _select_relations(
+        self,
+        kind: str,
+        limit: int,
+        *,
+        key_ids: set[str] | None = None,
+    ) -> list[ArchitectureRelationSummary]:
         edges = [
             edge
             for edge in self.graph.edges
             if edge.kind == kind
             and edge.source in self.graph.nodes
             and edge.target in self.graph.nodes
+            and not self._is_filtered_noise(self.graph.nodes[edge.source])
+            and not self._is_filtered_noise(self.graph.nodes[edge.target])
         ]
-        key_ids = {item.id for item in self._select_key_symbols()}
+        resolved_key_ids = (
+            key_ids
+            if key_ids is not None
+            else {item.id for item in self._select_key_symbols()}
+        )
         edges.sort(
             key=lambda edge: (
                 -(
-                    (4 if edge.source in key_ids else 0)
-                    + (4 if edge.target in key_ids else 0)
+                    (4 if edge.source in resolved_key_ids else 0)
+                    + (4 if edge.target in resolved_key_ids else 0)
                     + edge.occurrences
                 ),
                 edge.source,
@@ -548,8 +605,12 @@ class ArchitectureInputBuilder:
         return excerpts
 
     def _unresolved_summary(self) -> dict[str, int]:
-        imports = sum(1 for item in self.graph.unresolved if item.kind == "imports")
-        calls = sum(1 for item in self.graph.unresolved if item.kind == "calls")
+        imports = sum(
+            1 for item in self.graph.unresolved if item.kind in ("import", "imports")
+        )
+        calls = sum(
+            1 for item in self.graph.unresolved if item.kind in ("call", "calls")
+        )
         return {
             "total": len(self.graph.unresolved),
             "imports": imports,

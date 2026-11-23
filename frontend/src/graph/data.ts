@@ -4,24 +4,24 @@ import type {
   ApiNode,
   ApiProject,
   BreadcrumbItem,
-  MockEdge,
-  MockNode,
-  MockProject,
+  GraphEdge,
+  GraphNode,
+  ProjectInfo,
   ViewModel,
   ViewStats,
 } from "../types/graph";
 
 export interface GraphData {
-  project: MockProject;
-  nodes: MockNode[];
-  edges: MockEdge[];
+  project: ProjectInfo;
+  nodes: GraphNode[];
+  edges: GraphEdge[];
   stats: ViewStats;
 }
 
 export interface GraphIndex {
   data: GraphData;
-  nodeById: Map<string, MockNode>;
-  childrenByParent: Map<string | null, MockNode[]>;
+  nodeById: Map<string, GraphNode>;
+  childrenByParent: Map<string | null, GraphNode[]>;
 }
 
 function numberOrZero(value: unknown): number {
@@ -37,7 +37,7 @@ function buildStats(stats: Record<string, number>): ViewStats {
   };
 }
 
-function toMockEdge(edge: ApiEdge): MockEdge {
+function toGraphEdge(edge: ApiEdge): GraphEdge {
   return {
     id: edge.id,
     source: edge.source,
@@ -48,7 +48,7 @@ function toMockEdge(edge: ApiEdge): MockEdge {
   };
 }
 
-function toMockNode(node: ApiNode): MockNode {
+function toGraphNode(node: ApiNode): GraphNode {
   return {
     id: node.id,
     kind: node.kind,
@@ -77,7 +77,7 @@ function moduleDirectory(filePath: string | undefined): string | null {
 
 function rootContainerId(
   nodeId: string,
-  nodeById: Map<string, MockNode>,
+  nodeById: Map<string, GraphNode>,
 ): string {
   let current = nodeById.get(nodeId);
   const seen = new Set<string>();
@@ -96,8 +96,8 @@ function rootContainerId(
  * 生成前端包视图：目录直接作为一层模块容器，避免真实项目在根视图一次
  * 铺开上百个文件模块。包节点是纯展示节点，不参与原始 CodeGraph 统计。
  */
-function buildPackageViewNodes(nodes: MockNode[]): MockNode[] {
-  const modulesByDirectory = new Map<string, MockNode[]>();
+function buildPackageViewNodes(nodes: GraphNode[]): GraphNode[] {
+  const modulesByDirectory = new Map<string, GraphNode[]>();
   for (const node of nodes) {
     if (node.kind !== "module" || !node.filePath) {
       continue;
@@ -111,7 +111,7 @@ function buildPackageViewNodes(nodes: MockNode[]): MockNode[] {
     modulesByDirectory.set(directory, siblings);
   }
 
-  const packageNodes: MockNode[] = [];
+  const packageNodes: GraphNode[] = [];
   for (const [directory, modules] of modulesByDirectory) {
     const id = `package:${directory}`;
     const label = directory.split("/").pop() ?? directory;
@@ -132,13 +132,13 @@ function buildPackageViewNodes(nodes: MockNode[]): MockNode[] {
 }
 
 function buildPackageViewEdges(
-  nodes: MockNode[],
-  edges: MockEdge[],
-): MockEdge[] {
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+): GraphEdge[] {
   const nodeById = new Map(nodes.map((node) => [node.id, node]));
   const aggregated = new Map<
     string,
-    { source: string; target: string; kind: MockEdge["kind"]; count: number }
+    { source: string; target: string; kind: GraphEdge["kind"]; count: number }
   >();
 
   for (const edge of edges) {
@@ -179,9 +179,9 @@ export function buildGraphData(
   project: ApiProject,
   graph: ApiGraph,
 ): GraphData {
-  const nodes = graph.nodes.map(toMockNode);
+  const nodes = graph.nodes.map(toGraphNode);
   const packageNodes = buildPackageViewNodes(nodes);
-  const edges = [...graph.edges.map(toMockEdge)];
+  const edges = [...graph.edges.map(toGraphEdge)];
   edges.push(...buildPackageViewEdges([...packageNodes, ...nodes], edges));
 
   return {
@@ -199,10 +199,10 @@ export function buildGraphData(
 }
 
 export function buildGraphIndex(data: GraphData): GraphIndex {
-  const nodeById = new Map<string, MockNode>(
+  const nodeById = new Map<string, GraphNode>(
     data.nodes.map((node) => [node.id, node]),
   );
-  const childrenByParent = new Map<string | null, MockNode[]>();
+  const childrenByParent = new Map<string | null, GraphNode[]>();
   for (const node of data.nodes) {
     const siblings = childrenByParent.get(node.parentId) ?? [];
     siblings.push(node);
@@ -214,14 +214,14 @@ export function buildGraphIndex(data: GraphData): GraphIndex {
 export function getNode(
   index: GraphIndex,
   nodeId: string | null,
-): MockNode | null {
+): GraphNode | null {
   return nodeId ? index.nodeById.get(nodeId) ?? null : null;
 }
 
 export function getChildren(
   index: GraphIndex,
   parentId: string | null,
-): MockNode[] {
+): GraphNode[] {
   return index.childrenByParent.get(parentId) ?? [];
 }
 
@@ -232,8 +232,8 @@ export function hasChildren(index: GraphIndex, nodeId: string): boolean {
 export function getPathToRoot(
   index: GraphIndex,
   nodeId: string | null,
-): MockNode[] {
-  const path: MockNode[] = [];
+): GraphNode[] {
+  const path: GraphNode[] = [];
   let current = getNode(index, nodeId);
   while (current) {
     path.push(current);
@@ -284,7 +284,7 @@ export function buildBreadcrumbs(
   return items;
 }
 
-export function summarizeChildren(node: MockNode, children: MockNode[]): string {
+export function summarizeChildren(node: GraphNode, children: GraphNode[]): string {
   if (children.length === 0) {
     return "";
   }
@@ -305,13 +305,13 @@ export function summarizeChildren(node: MockNode, children: MockNode[]): string 
   return `${children.length} 个子节点`;
 }
 
-export function getChildSummary(index: GraphIndex, node: MockNode): string {
+export function getChildSummary(index: GraphIndex, node: GraphNode): string {
   return summarizeChildren(node, getChildren(index, node.id));
 }
 
 export interface NodeRelationItem {
-  node: MockNode;
-  edgeKind: MockEdge["kind"];
+  node: GraphNode;
+  edgeKind: GraphEdge["kind"];
 }
 
 export function getNodeRelations(

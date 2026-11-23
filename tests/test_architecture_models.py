@@ -191,16 +191,35 @@ def test_graph_validator_canonicalizes_refs_and_downgrades_unproven_edges(
         ).validate(invalid_graph)
 
 
-def test_phase_4_1_frontend_mock_is_loadable_by_backend_model() -> None:
-    root = Path(__file__).resolve().parents[1]
-    raw = json.loads(
-        (root / "frontend" / "src" / "mocks" / "architecture-graph.json").read_text(
-            encoding="utf-8"
-        )
-    )
+def test_legacy_string_version_mock_payload_is_loadable_by_backend_model() -> None:
+    raw = {
+        "version": "phase-4.1-mock",
+        "mock": True,
+        "project": {
+            "name": "mini-harness",
+            "root": "/tmp/demo",
+            "description": "Legacy schema compatibility payload",
+        },
+        "defaultViewId": "overview",
+        "views": {
+            "overview": {
+                "id": "overview",
+                "title": "System Overview",
+                "nodes": [
+                    {
+                        "id": "runtime",
+                        "kind": "component",
+                        "label": "Agent Runtime",
+                        "nested": [{"id": "agent-runner", "label": "AgentRunner"}],
+                    }
+                ],
+                "edges": [],
+            }
+        },
+    }
     graph = ArchitectureGraph.from_dict(raw)
 
     assert graph.mock is True
     assert graph.default_view_id == "overview"
-    assert set(graph.views_by_id) == {"overview", "agent-loop", "agent-runner"}
-    assert graph.views_by_id["overview"].nodes[2].nested[0].label == "AgentRunner"
+    assert set(graph.views_by_id) == {"overview"}
+    assert graph.views_by_id["overview"].nodes[0].nested[0].label == "AgentRunner"

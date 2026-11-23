@@ -113,12 +113,19 @@ def main(argv: list[str] | None = None) -> int:
     print(
         "输入规模："
         f"{len(analysis_input.entry_points)} 个入口候选 / "
+        f"{len(analysis_input.communities)} 个子系统社区 / "
         f"{len(analysis_input.modules)} 个模块 / "
         f"{len(analysis_input.key_symbols)} 个关键符号 / "
         f"{len(analysis_input.imports)} 条 import / "
         f"{len(analysis_input.calls)} 条 call / "
         f"{len(analysis_input.source_excerpts)} 段源码"
     )
+    print("子系统社区：")
+    for comm in analysis_input.communities[:8]:
+        print(
+            f"  - {comm.name} ({comm.module_count} modules, {comm.symbol_count} symbols, "
+            f"internal={comm.internal_edges}, links={len(comm.external_links)})"
+        )
     print("入口候选：")
     for entry in analysis_input.entry_points[:8]:
         reasons = "；".join(entry.reasons)

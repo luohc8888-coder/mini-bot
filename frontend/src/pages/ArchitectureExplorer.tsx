@@ -453,9 +453,7 @@ export function ArchitectureExplorer({
   };
 
   const badgeMode: ArchitectureBadgeMode = graph
-    ? graph.mock
-      ? "mock"
-      : "live"
+    ? "live"
     : analyzing
       ? "loading"
       : status?.configured
@@ -464,13 +462,9 @@ export function ArchitectureExplorer({
           ? "unconfigured"
           : "loading";
 
-  const subtitle = graph
-    ? graph.mock
-      ? "AI 驱动的项目架构理解工作台 · Mock"
-      : "AI 驱动的项目架构理解工作台"
-    : analyzing
-      ? "AI 正在读取结构化索引并生成运行架构…"
-      : "AI 驱动的项目架构理解工作台";
+  const subtitle = analyzing
+    ? "AI 正在读取结构化索引并生成运行架构…"
+    : "AI 驱动的项目架构理解工作台";
 
 
   return (
@@ -520,13 +514,11 @@ export function ArchitectureExplorer({
               <span className="view-context__kind">
                 {sourceRef
                   ? "核心源码"
-                  : graph?.mock
-                    ? "Mock"
-                    : graph
-                      ? "LLM 架构"
-                      : status?.cacheStatus === "stale"
-                        ? "缓存已过期"
-                        : "等待生成"}
+                  : graph
+                    ? "LLM 架构"
+                    : status?.cacheStatus === "stale"
+                      ? "缓存已过期"
+                      : "等待生成"}
               </span>
             </div>
             {currentView && !sourceRef ? (
@@ -599,7 +591,7 @@ export function ArchitectureExplorer({
           >
             <div
               className={`runtime-notice${
-                graph && !graph.mock ? " runtime-notice--live" : ""
+                graph ? " runtime-notice--live" : ""
               }`}
             >
               <span className="runtime-notice__mark" aria-hidden="true">
@@ -608,20 +600,16 @@ export function ArchitectureExplorer({
               <span className="runtime-notice__title">
                 {analyzing
                   ? "ANALYZING"
-                  : graph?.mock
-                    ? "MOCK ARCHITECTURE"
-                    : graph
-                      ? "AI ARCHITECTURE"
-                      : "NO ARCHITECTURE"}
+                  : graph
+                    ? "AI ARCHITECTURE"
+                    : "NO ARCHITECTURE"}
               </span>
               <span className="runtime-notice__copy">
                 {analyzing
                   ? "LLM 正在读取结构化索引与源码窗口"
-                  : graph?.mock
-                    ? "Phase 4.1 · 不调用 LLM"
-                    : graph
-                      ? "Phase 4.3 · SymbolIndex 已验证"
-                      : "尚未生成可交互的运行架构"}
+                  : graph
+                    ? "SymbolIndex 已验证"
+                    : "尚未生成可交互的运行架构"}
               </span>
             </div>
 
@@ -664,7 +652,6 @@ export function ArchitectureExplorer({
                 <ReactFlowProvider>
                   <RuntimeCanvas
                     view={currentView}
-                    graphMock={graph?.mock ?? false}
                     selectedId={selectedId}
                     relationMode={relationMode}
                     onNodeClick={handleNodeClick}
@@ -768,15 +755,11 @@ export function ArchitectureExplorer({
             onNestedClick={handleNestedClick}
             onLocateInStructure={onLocateInStructure}
             activeSourceId={null}
-            analysis={
-              graph.mock
-                ? null
-                : {
-                    provider: status?.provider ?? "",
-                    model: status?.model ?? "",
-                    source: analysisSource,
-                  }
-            }
+            analysis={{
+              provider: status?.provider ?? "",
+              model: status?.model ?? "",
+              source: analysisSource,
+            }}
           />
         ) : (
           <ArchitectureEmptyInspector
@@ -792,19 +775,13 @@ export function ArchitectureExplorer({
       <footer className="status-bar">
         <span>
           <span
-            className={`status-dot${
-              graph && !graph.mock ? " status-dot--green" : ""
-            }`}
+            className={`status-dot${graph ? " status-dot--green" : ""}`}
           />
           固定 Workspace：{workspaceRoot}
         </span>
         <span className="status-bar__right">
           <span>
-            {graph
-              ? graph.mock
-                ? "Mock ArchitectureGraph"
-                : "LLM ArchitectureGraph"
-              : "ArchitectureGraph 未生成"}
+            {graph ? "LLM ArchitectureGraph" : "ArchitectureGraph 未生成"}
           </span>
           <span className="status-bar__divider">/</span>
           <span>{status?.provider || "Provider 未配置"}</span>

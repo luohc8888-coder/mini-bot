@@ -49,7 +49,6 @@ const FIT_VIEW_OPTIONS = {
 
 interface RuntimeCanvasProps {
   view: ArchitectureView;
-  graphMock: boolean;
   selectedId: string | null;
   relationMode: RelationMode;
   onNodeClick: (nodeId: string) => void;
@@ -61,7 +60,6 @@ interface RuntimeCanvasProps {
 
 export function RuntimeCanvas({
   view,
-  graphMock,
   selectedId,
   relationMode,
   onNodeClick,
@@ -90,7 +88,6 @@ export function RuntimeCanvas({
     setEdgeRoutes({});
 
     void layoutRuntimeView(view, {
-      mock: graphMock,
       onNestedClick,
       onSourceOpen,
     }).then((result) => {
@@ -111,7 +108,7 @@ export function RuntimeCanvas({
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view, graphMock, onNestedClick, onSourceOpen, setFlowNodes, fitView]);
+  }, [view, onNestedClick, onSourceOpen, setFlowNodes, fitView]);
 
   useEffect(() => {
     setFlowEdges(

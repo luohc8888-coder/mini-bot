@@ -20,16 +20,3 @@ export function findArchitectureNode(
     null
   );
 }
-
-export function architectureViewStats(
-  graph: ArchitectureGraph,
-  viewId: string,
-): { nodes: number; edges: number; components: number; conditions: number } {
-  const view = getArchitectureView(graph, viewId);
-  return {
-    nodes: view.nodes.length,
-    edges: view.edges.length,
-    components: view.nodes.filter((node) => node.kind === "component").length,
-    conditions: view.nodes.filter((node) => node.kind === "condition").length,
-  };
-}

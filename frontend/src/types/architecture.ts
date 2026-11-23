@@ -89,10 +89,9 @@ export interface ArchitectureView {
 }
 
 export interface ArchitectureGraph {
-  /** Phase 4.2 起由后端返回；Mock 数据只有 version。 */
   schemaVersion?: number;
   version: string;
-  mock: boolean;
+  mock?: boolean;
   project: {
     name: string;
     root: string;

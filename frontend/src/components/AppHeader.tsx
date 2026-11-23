@@ -3,7 +3,6 @@ import { useTheme } from "../theme";
 
 export type ArchitectureBadgeMode =
   | "live"
-  | "mock"
   | "loading"
   | "ready"
   | "unconfigured";
@@ -22,7 +21,6 @@ const ARCHITECTURE_BADGES: Record<
   { label: string; className: string }
 > = {
   live: { label: "LIVE LLM", className: "live-badge" },
-  mock: { label: "MOCK FLOW", className: "mock-badge" },
   loading: { label: "ANALYZING", className: "live-badge" },
   ready: { label: "LLM READY", className: "live-badge" },
   unconfigured: { label: "NO LLM", className: "mock-badge" },
@@ -40,7 +38,7 @@ export function AppHeader({
   onViewChange,
   onOpenSearch,
   subtitle,
-  architectureMode = "mock",
+  architectureMode = "ready",
 }: AppHeaderProps) {
   const architectureBadge = ARCHITECTURE_BADGES[architectureMode];
   const [theme, setTheme] = useTheme();

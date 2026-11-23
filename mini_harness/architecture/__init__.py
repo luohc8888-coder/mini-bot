@@ -13,6 +13,12 @@ from .cache import (
     codegraph_fingerprint,
     default_architecture_cache_dir,
 )
+from .communities import (
+    ArchitectureCommunity,
+    CommunityLink,
+    detect_architecture_communities,
+    is_noise_path,
+)
 from .input import (
     ARCHITECTURE_INPUT_SCHEMA_VERSION,
     ArchitectureAnalysisInput,
@@ -86,6 +92,7 @@ __all__ = [
     "ArchitectureCache",
     "ArchitectureCacheError",
     "ArchitectureCacheInfo",
+    "ArchitectureCommunity",
     "ArchitectureEdge",
     "ArchitectureEntryPoint",
     "ArchitectureError",
@@ -107,6 +114,7 @@ __all__ = [
     "ArchitectureValidationIssue",
     "ArchitectureValidationReport",
     "ArchitectureView",
+    "CommunityLink",
     "SourceReferenceProtocol",
     "SourceRefProtocol",
     "SymbolIndex",
@@ -114,6 +122,8 @@ __all__ = [
     "build_architecture_prompt",
     "codegraph_fingerprint",
     "default_architecture_cache_dir",
+    "detect_architecture_communities",
+    "is_noise_path",
     "parse_architecture_graph",
     "validate_architecture_graph",
 ]

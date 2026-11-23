@@ -746,8 +746,9 @@ class CodeGraphBuilder:
         if bound is not None:
             if len(parts) == 1:
                 return bound, "static"
-            candidate = f"{bound.qualified_name}.{'.'.join(parts[1:])}"
-            target = self.by_qualified.get(candidate)
+            target = self._resolve_member_with_inheritance(
+                bound, parts[1:]
+            )
             if target is not None:
                 return target, "static"
             return None, "unresolved"
@@ -755,8 +756,9 @@ class CodeGraphBuilder:
         if first in ("self", "cls", "this"):
             class_symbol = self._enclosing_class(caller)
             if class_symbol is not None and len(parts) > 1:
-                candidate = f"{class_symbol.qualified_name}.{'.'.join(parts[1:])}"
-                target = self.by_qualified.get(candidate)
+                target = self._resolve_member_with_inheritance(
+                    class_symbol, parts[1:]
+                )
                 if target is not None:
                     return target, "static"
             return None, "unresolved"
@@ -780,7 +782,14 @@ class CodeGraphBuilder:
             ):
                 target = self.by_qualified.get(candidate)
                 if target is not None:
-                    return target, "static"
+                    if len(parts) > 1 and candidate.endswith(f".{first}"):
+                        member = self._resolve_member_with_inheritance(
+                            target, parts[1:]
+                        )
+                        if member is not None:
+                            return member, "static"
+                    else:
+                        return target, "static"
 
         # 嵌套函数：inner() 的父节点通常是当前函数。
         for scope in self._scope_chain(caller):
@@ -815,6 +824,66 @@ class CodeGraphBuilder:
         if first in self.external_names_by_file.get(caller.file_path, set()):
             return None, "external"
         return None, "unresolved"
+
+    def _resolve_member_with_inheritance(
+        self,
+        owner: SymbolRecord,
+        member_parts: list[str],
+    ) -> SymbolRecord | None:
+        """在类及其直接/多级父类（含 Mixin）中查找成员方法。"""
+        suffix = ".".join(member_parts)
+        direct = self.by_qualified.get(f"{owner.qualified_name}.{suffix}")
+        if direct is not None:
+            return direct
+        if owner.kind != "class" or not owner.bases:
+            return None
+
+        visited: set[str] = {owner.id}
+        frontier: list[SymbolRecord] = [owner]
+        for _ in range(4):
+            next_frontier: list[SymbolRecord] = []
+            for cls_sym in frontier:
+                for base_expr in cls_sym.bases:
+                    base_sym = self._resolve_base_class(cls_sym, base_expr)
+                    if base_sym is None or base_sym.id in visited:
+                        continue
+                    visited.add(base_sym.id)
+                    cand = self.by_qualified.get(
+                        f"{base_sym.qualified_name}.{suffix}"
+                    )
+                    if cand is not None:
+                        return cand
+                    next_frontier.append(base_sym)
+            if not next_frontier:
+                break
+            frontier = next_frontier
+        return None
+
+    def _resolve_base_class(
+        self, cls_sym: SymbolRecord, base_expr: str
+    ) -> SymbolRecord | None:
+        """将基类表达式解析为项目内 SymbolRecord。"""
+        clean = base_expr.split("[", 1)[0].strip()
+        if not clean:
+            return None
+        if clean in self.by_qualified:
+            return self.by_qualified[clean]
+        bound = self.bound_symbols_by_file.get(cls_sym.file_path, {}).get(clean)
+        if bound is not None:
+            return bound
+        parts = clean.split(".")
+        if len(parts) > 1:
+            bindings = self.bindings_by_file.get(cls_sym.file_path, {})
+            if parts[0] in bindings:
+                cand = f"{bindings[parts[0]]}.{'.'.join(parts[1:])}"
+                if cand in self.by_qualified:
+                    return self.by_qualified[cand]
+        mod = self.module_by_file.get(cls_sym.file_path)
+        if mod is not None:
+            cand = f"{mod.qualified_name}.{clean}"
+            if cand in self.by_qualified:
+                return self.by_qualified[cand]
+        return None
 
     def _enclosing_class(self, symbol: SymbolRecord) -> SymbolRecord | None:
         """向父链查找最近的 class 节点。"""

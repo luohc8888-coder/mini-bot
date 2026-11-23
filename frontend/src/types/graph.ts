@@ -6,14 +6,14 @@ export type EdgeKind = "contains" | "imports" | "calls";
 
 export type Confidence = "static" | "inferred";
 
-export interface MockNode {
+export interface GraphNode {
   id: string;
   kind: NodeKind;
   label: string;
   parentId: string | null;
   /** Logical source directory or module path used for display. */
   path?: string;
-  /** Workspace-relative Python file path. */
+  /** Workspace-relative file path. */
   filePath?: string;
   startLine?: number;
   endLine?: number;
@@ -26,7 +26,7 @@ export interface MockNode {
   synthetic?: boolean;
 }
 
-export interface MockEdge {
+export interface GraphEdge {
   id: string;
   source: string;
   target: string;
@@ -35,17 +35,11 @@ export interface MockEdge {
   note?: string;
 }
 
-export interface MockProject {
+export interface ProjectInfo {
   name: string;
   root: string;
   description: string;
   version: string;
-}
-
-export interface MockGraph {
-  project: MockProject;
-  nodes: MockNode[];
-  edges: MockEdge[];
 }
 
 /** FastAPI `/api/project` 返回结构。 */
@@ -108,10 +102,10 @@ export interface BreadcrumbItem {
 export interface ViewModel {
   containerId: string | null;
   selectedId: string | null;
-  visibleNodes: MockNode[];
-  visibleEdges: MockEdge[];
+  visibleNodes: GraphNode[];
+  visibleEdges: GraphEdge[];
   breadcrumbs: BreadcrumbItem[];
-  inspectorNode: MockNode | null;
+  inspectorNode: GraphNode | null;
 }
 
 export interface ViewStats {

@@ -5,7 +5,7 @@ import {
 } from "../architecture/api";
 import type { NodeRelationItem } from "../graph/data";
 import type { SourceSnippet } from "../types/architecture";
-import type { MockNode, MockProject, NodeKind, ViewStats } from "../types/graph";
+import type { GraphNode, ProjectInfo, NodeKind, ViewStats } from "../types/graph";
 
 const KIND_LABELS: Record<NodeKind, string> = {
   module: "模块",
@@ -22,9 +22,9 @@ const KIND_ICONS: Record<NodeKind, string> = {
 };
 
 interface InspectorPanelProps {
-  node: MockNode | null;
+  node: GraphNode | null;
   selected: boolean;
-  project: MockProject;
+  project: ProjectInfo;
   stats: ViewStats;
   childSummary: string;
   hasChildren: boolean;
@@ -33,11 +33,11 @@ interface InspectorPanelProps {
   aiConfigured: boolean;
   onClearSelection: () => void;
   onDrillDown: (nodeId: string) => void;
-  onOpenSource: (node: MockNode) => void;
+  onOpenSource: (node: GraphNode) => void;
   onNavigateNode: (nodeId: string) => void;
 }
 
-function kindClass(node: MockNode | null): string {
+function kindClass(node: GraphNode | null): string {
   return node ? `kind-${node.kind}` : "kind-project";
 }
 

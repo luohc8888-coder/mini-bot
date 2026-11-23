@@ -1,7 +1,7 @@
 import dagre from "@dagrejs/dagre";
 import { MarkerType, type Edge, type Node } from "@xyflow/react";
 import { summarizeChildren } from "./data";
-import type { MockEdge, MockNode, NodeKind } from "../types/graph";
+import type { GraphEdge, GraphNode, NodeKind } from "../types/graph";
 
 export interface ArchitectureNodeData extends Record<string, unknown> {
   label: string;
@@ -36,15 +36,15 @@ const KIND_LABELS: Record<NodeKind, string> = {
   method: "方法",
 };
 
-function nodeMeta(node: MockNode): string {
+function nodeMeta(node: GraphNode): string {
   const source = node.filePath ?? node.path ?? "";
   const line = node.startLine ? `:${node.startLine}` : "";
   return `${source}${line}`;
 }
 
 function buildFlowNode(
-  node: MockNode,
-  childrenByParent: Map<string | null, MockNode[]>,
+  node: GraphNode,
+  childrenByParent: Map<string | null, GraphNode[]>,
   onNodeAction?: (nodeId: string) => void,
 ): ArchitectureFlowNode {
   const size = NODE_SIZES[node.kind];
@@ -71,7 +71,7 @@ function buildFlowNode(
   };
 }
 
-function buildFlowEdge(edge: MockEdge): Edge {
+function buildFlowEdge(edge: GraphEdge): Edge {
   const inferred = edge.confidence === "inferred";
   const color =
     edge.kind === "imports"
@@ -126,23 +126,23 @@ export interface LayoutResult {
  * 后续可以把更大层级的布局移到 Worker 或服务端。
  */
 export function layoutGraph(
-  mockNodes: MockNode[],
-  mockEdges: MockEdge[],
-  childrenByParent: Map<string | null, MockNode[]> = new Map(),
+  graphNodes: GraphNode[],
+  graphEdges: GraphEdge[],
+  childrenByParent: Map<string | null, GraphNode[]> = new Map(),
   onNodeAction?: (nodeId: string) => void,
 ): LayoutResult {
-  if (mockNodes.length === 0) {
+  if (graphNodes.length === 0) {
     return { nodes: [], edges: [] };
   }
 
   // 小层级使用网格布局：项目根视图通常只有包容器，网格能让标签保持可读；
   // 大层级再交给 Dagre 做依赖方向布局。
-  if (mockNodes.length <= 40) {
-    const columns = Math.max(1, Math.ceil(Math.sqrt(mockNodes.length)));
+  if (graphNodes.length <= 40) {
+    const columns = Math.max(1, Math.ceil(Math.sqrt(graphNodes.length)));
     const cellWidth = 290;
     const cellHeight = 150;
-    const nodes = mockNodes.map((mockNode, index) => {
-      const flowNode = buildFlowNode(mockNode, childrenByParent, onNodeAction);
+    const nodes = graphNodes.map((graphNode, index) => {
+      const flowNode = buildFlowNode(graphNode, childrenByParent, onNodeAction);
       return {
         ...flowNode,
         position: {
@@ -151,8 +151,8 @@ export function layoutGraph(
         },
       };
     });
-    const visibleIds = new Set(mockNodes.map((node) => node.id));
-    const edges = mockEdges
+    const visibleIds = new Set(graphNodes.map((node) => node.id));
+    const edges = graphEdges
       .filter(
         (edge) =>
           visibleIds.has(edge.source) && visibleIds.has(edge.target),
@@ -172,12 +172,12 @@ export function layoutGraph(
     marginy: 16,
   });
 
-  const visibleIds = new Set(mockNodes.map((node) => node.id));
-  for (const mockNode of mockNodes) {
-    const size = NODE_SIZES[mockNode.kind];
-    graph.setNode(mockNode.id, { width: size.width, height: size.height });
+  const visibleIds = new Set(graphNodes.map((node) => node.id));
+  for (const graphNode of graphNodes) {
+    const size = NODE_SIZES[graphNode.kind];
+    graph.setNode(graphNode.id, { width: size.width, height: size.height });
   }
-  for (const edge of mockEdges) {
+  for (const edge of graphEdges) {
     if (visibleIds.has(edge.source) && visibleIds.has(edge.target)) {
       graph.setEdge(edge.source, edge.target);
     }
@@ -185,10 +185,10 @@ export function layoutGraph(
 
   dagre.layout(graph);
 
-  const nodes = mockNodes.map((mockNode) => {
-    const flowNode = buildFlowNode(mockNode, childrenByParent, onNodeAction);
-    const layoutNode = graph.node(mockNode.id);
-    const size = NODE_SIZES[mockNode.kind];
+  const nodes = graphNodes.map((graphNode) => {
+    const flowNode = buildFlowNode(graphNode, childrenByParent, onNodeAction);
+    const layoutNode = graph.node(graphNode.id);
+    const size = NODE_SIZES[graphNode.kind];
     return {
       ...flowNode,
       position: {
@@ -198,7 +198,7 @@ export function layoutGraph(
     };
   });
 
-  const edges = mockEdges
+  const edges = graphEdges
     .filter(
       (edge) => visibleIds.has(edge.source) && visibleIds.has(edge.target),
     )

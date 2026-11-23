@@ -73,7 +73,8 @@ SYSTEM_PROMPT = """你是 Mini Harness 的本地代码架构分析器。你的�
 7. 不要调用工具。不要修改或声称修改任何文件。
 
 ## 分析重点
-- 从入口候选与关键符号中识别真正的运行主链路；
+- 优先以输入中已预聚类的 `communities`（子系统社区及其跨社区依赖链路）作为顶层架构划分骨架；
+- 从入口候选与关键符号中识别真正的运行主链路（涵盖 CLI / Web / 前端入口）；
 - 区分入口、核心组件、执行阶段、条件分支和外部/基础设施依赖；
 - 使用 import/call 关系推断组件之间的 flow、data、branch、dependency；
 - 对 AgentLoop、AgentRunner、Provider、ToolRegistry、Session 等关键组件，可以生成下钻 detail view 和 nested 入口。
@@ -140,61 +141,76 @@ def build_architecture_prompt(
 
 
 def _compact_payload(analysis_input: ArchitectureAnalysisInput) -> dict[str, Any]:
-    """把完整分析输入压缩成适合 Prompt 的稳定结构。"""
-    return {
+    """把完整分析输入压缩成高信噪比、适合 Prompt 的紧凑结构。
+
+    当存在预聚类 ``communities`` 时，由社区摘要承载全仓模块拓扑与跨子系统链路，
+    避免把数十个平铺模块和冗余空字段全部堆进 LLM 上下文窗口。
+    """
+    has_communities = bool(analysis_input.communities)
+    module_cap = 20 if has_communities else 50
+    key_cap = 45 if has_communities else 60
+    import_cap = 45 if has_communities else 80
+    call_cap = 80 if has_communities else 120
+    excerpt_cap = 6 if has_communities else 8
+
+    payload: dict[str, Any] = {
         "schemaVersion": analysis_input.schema_version,
         "project": {
             "name": analysis_input.project_name,
             "root": analysis_input.workspace_root,
         },
-        "generatedAt": analysis_input.generated_at,
         "graphStats": dict(analysis_input.graph_stats),
+        "communities": [
+            {
+                "id": comm.id,
+                "name": comm.name,
+                "moduleCount": comm.module_count,
+                "symbolCount": comm.symbol_count,
+                "hubSymbols": comm.hub_symbols,
+                "externalLinks": [link.to_dict() for link in comm.external_links],
+            }
+            for comm in analysis_input.communities
+        ],
         "entryPoints": [
             {
                 "symbol": _compact_symbol(entry.symbol, include_doc=False),
                 "reasons": list(entry.reasons),
                 "score": entry.score,
             }
-            for entry in analysis_input.entry_points
+            for entry in analysis_input.entry_points[:10]
         ],
         "modules": [
             {
                 "id": symbol.id,
-                "qualifiedName": symbol.qualified_name,
                 "filePath": symbol.file_path,
-                "startLine": symbol.start_line,
-                "endLine": symbol.end_line,
             }
-            for symbol in analysis_input.modules
+            for symbol in analysis_input.modules[:module_cap]
         ],
         "keySymbols": [
             _compact_symbol(symbol, include_doc=True)
-            for symbol in analysis_input.key_symbols
+            for symbol in analysis_input.key_symbols[:key_cap]
         ],
         "imports": [
             _compact_relation(relation)
-            for relation in analysis_input.imports
+            for relation in analysis_input.imports[:import_cap]
         ],
         "calls": [
             _compact_relation(relation)
-            for relation in analysis_input.calls
+            for relation in analysis_input.calls[:call_cap]
         ],
         "sourceExcerpts": [
             {
                 "symbolId": excerpt.symbol_id,
-                "qualifiedName": excerpt.qualified_name,
                 "filePath": excerpt.file_path,
                 "startLine": excerpt.start_line,
                 "endLine": excerpt.end_line,
-                "text": excerpt.text,
-                "truncated": excerpt.truncated,
+                "text": excerpt.text[:1600],
             }
-            for excerpt in analysis_input.source_excerpts
+            for excerpt in analysis_input.source_excerpts[:excerpt_cap]
         ],
         "unresolvedSummary": dict(analysis_input.unresolved_summary),
-        "limits": dict(analysis_input.limits),
-        "warnings": list(analysis_input.warnings),
     }
+    return payload
 
 
 def _compact_symbol(symbol: Any, *, include_doc: bool) -> dict[str, Any]:
@@ -202,31 +218,31 @@ def _compact_symbol(symbol: Any, *, include_doc: bool) -> dict[str, Any]:
         "id": symbol.id,
         "kind": symbol.kind,
         "name": symbol.name,
-        "qualifiedName": symbol.qualified_name,
         "filePath": symbol.file_path,
-        "startLine": symbol.start_line,
-        "endLine": symbol.end_line,
-        "signature": symbol.signature,
-        "callerCount": symbol.caller_count,
-        "calleeCount": symbol.callee_count,
+        "lines": f"{symbol.start_line}-{symbol.end_line}",
     }
+    if symbol.caller_count or symbol.callee_count:
+        item["in"] = symbol.caller_count
+        item["out"] = symbol.callee_count
+    if symbol.signature:
+        item["sig"] = symbol.signature[:120]
     if include_doc and symbol.docstring:
-        item["docstring"] = symbol.docstring[:240]
+        first_line = symbol.docstring.strip().splitlines()[0].strip()
+        if first_line:
+            item["doc"] = first_line[:120]
     return item
 
 
 def _compact_relation(relation: Any) -> dict[str, Any]:
     item: dict[str, Any] = {
-        "id": relation.id,
         "source": relation.source,
         "target": relation.target,
         "kind": relation.kind,
-        "confidence": relation.confidence,
-        "line": relation.line,
-        "occurrences": relation.occurrences,
     }
+    if relation.occurrences > 1:
+        item["n"] = relation.occurrences
     if relation.detail:
-        item["detail"] = relation.detail[:160]
+        item["detail"] = relation.detail[:80]
     return item
 
 
@@ -256,7 +272,7 @@ def _fit_payload(payload: dict[str, Any], *, max_input_tokens: int) -> dict[str,
         if _estimate_prompt_tokens(system_text, user_text) <= max_input_tokens:
             return candidate
 
-    # 最后的硬压缩：只保留入口/关键符号的 id 与少量关系，源码片段全删。
+    # 最后的硬压缩：只保留社区摘要、入口/关键符号的 id 与少量关系，源码片段全删。
     hard = dict(payload)
     hard["sourceExcerpts"] = []
     hard["modules"] = []
@@ -267,24 +283,28 @@ def _fit_payload(payload: dict[str, Any], *, max_input_tokens: int) -> dict[str,
         {
             "id": item["id"],
             "kind": item["kind"],
-            "qualifiedName": item["qualifiedName"],
+            "name": item.get("name", ""),
             "filePath": item["filePath"],
-            "startLine": item["startLine"],
-            "endLine": item["endLine"],
         }
         for item in payload["keySymbols"][:15]
     ]
-    hard["keySymbols"] = hard["keySymbols"][:15]
     return hard
 
 
 def _trim_stages(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    """生成从较完整到最小化的候选输入序列。"""
+    """生成从完整（未裁剪）到最小化的候选输入序列。"""
     stage_limits = [
-        (8, 160, 90, 60, 50, 10),
-        (5, 100, 50, 40, 35, 8),
-        (3, 60, 30, 30, 20, 6),
-        (1, 30, 15, 20, 10, 4),
+        (
+            len(payload["sourceExcerpts"]),
+            len(payload["calls"]),
+            len(payload["imports"]),
+            len(payload["keySymbols"]),
+            len(payload["modules"]),
+            len(payload["entryPoints"]),
+        ),
+        (5, 70, 40, 36, 16, 8),
+        (3, 45, 25, 26, 10, 6),
+        (1, 25, 12, 18, 6, 4),
         (0, 15, 8, 10, 0, 3),
     ]
     stages: list[dict[str, Any]] = []

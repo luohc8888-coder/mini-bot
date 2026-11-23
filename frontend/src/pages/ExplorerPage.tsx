@@ -29,7 +29,7 @@ import type {
   ArchitectureSourceRef,
   ExplorerViewMode,
 } from "../types/architecture";
-import type { MockNode, NodeKind } from "../types/graph";
+import type { GraphNode, NodeKind } from "../types/graph";
 
 const KIND_LABELS: Record<NodeKind, string> = {
   module: "模块",
@@ -42,7 +42,7 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function nodeToSourceRef(node: MockNode): ArchitectureSourceRef {
+function nodeToSourceRef(node: GraphNode): ArchitectureSourceRef {
   return {
     symbolId: node.id,
     symbolName: node.label,
@@ -124,7 +124,7 @@ export function ExplorerPage() {
     [index, containerId, selectedId],
   );
 
-  const openNodeSource = useCallback((node: MockNode) => {
+  const openNodeSource = useCallback((node: GraphNode) => {
     if (node.synthetic) {
       return;
     }
@@ -258,7 +258,7 @@ export function ExplorerPage() {
   );
 
   const handleSearchSelect = useCallback(
-    (node: MockNode, openSource: boolean) => {
+    (node: GraphNode, openSource: boolean) => {
       setSearchOpen(false);
       handleNavigateToNode(node.id, openSource);
     },

@@ -1618,18 +1618,6 @@ textarea:focus-visible {
   letter-spacing: 0.04em;
 }
 
-.runtime-node__mock {
-  margin-left: auto;
-  padding: 2px 4px;
-  border: 1px solid rgba(242, 201, 76, 0.28);
-  border-radius: 3px;
-  color: #c8aa55;
-  font-family: var(--font-mono);
-  font-size: 7px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-}
-
 .runtime-node__title {
   flex: 0 0 auto;
   margin-top: 6px;

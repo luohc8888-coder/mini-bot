@@ -1,7 +1,6 @@
 import { MarkerType, type Edge, type Node } from "@xyflow/react";
 import type {
   ArchitectureEdge,
-  ArchitectureGraph,
   ArchitectureNode,
   ArchitectureNodeKind,
   ArchitectureSourceRef,
@@ -17,7 +16,6 @@ export interface RuntimeNodeData extends Record<string, unknown> {
   detailView?: string;
   nested: NonNullable<ArchitectureNode["nested"]>;
   sourceRefs: ArchitectureSourceRef[];
-  mock: boolean;
   onNestedClick?: (detailView: string) => void;
   onSourceOpen?: (source: ArchitectureSourceRef) => void;
 }
@@ -94,7 +92,6 @@ export function runtimeNodeSize(node: ArchitectureNode): {
 
 export function buildRuntimeFlowNode(
   node: ArchitectureNode,
-  mock: boolean,
   onNestedClick: (detailView: string) => void,
   onSourceOpen?: (source: ArchitectureSourceRef) => void,
 ): RuntimeFlowNode {
@@ -112,7 +109,6 @@ export function buildRuntimeFlowNode(
       detailView: node.detailView,
       nested: node.nested ?? [],
       sourceRefs: node.sourceRefs ?? [],
-      mock,
       onNestedClick,
       onSourceOpen,
     },
@@ -131,7 +127,6 @@ export function buildRuntimeFlowNode(
  */
 export function buildRuntimeFlowNodes(
   view: ArchitectureView,
-  mock: boolean,
   onNestedClick: (detailView: string) => void,
   onSourceOpen?: (source: ArchitectureSourceRef) => void,
 ): RuntimeFlowNode[] {
@@ -140,7 +135,7 @@ export function buildRuntimeFlowNodes(
   const cellWidth = 440;
   const cellHeight = 300;
   return view.nodes.map((node, index) => ({
-    ...buildRuntimeFlowNode(node, mock, onNestedClick, onSourceOpen),
+    ...buildRuntimeFlowNode(node, onNestedClick, onSourceOpen),
     position: node.position ?? {
       x: (index % columnCount) * cellWidth,
       y: Math.floor(index / columnCount) * cellHeight,
@@ -314,10 +309,4 @@ export function buildRuntimeFlowEdge(
           : true),
     },
   };
-}
-
-export function runtimeGraphSummary(graph: ArchitectureGraph, view: ArchitectureView): string {
-  const componentCount = view.nodes.filter((node) => node.kind === "component").length;
-  const conditionCount = view.nodes.filter((node) => node.kind === "condition").length;
-  return `${componentCount} 个组件 · ${conditionCount} 个条件 · ${graph.mock ? "Mock 数据" : "已校验数据"}`;
 }

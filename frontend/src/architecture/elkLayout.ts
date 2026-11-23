@@ -55,7 +55,6 @@ async function getElk(): Promise<ElkInstance> {
 }
 
 export interface RuntimeLayoutOptions {
-  mock: boolean;
   onNestedClick: (detailView: string) => void;
   onSourceOpen?: (source: ArchitectureSourceRef) => void;
 }
@@ -73,7 +72,6 @@ function buildLegacyLayout(
   return {
     nodes: buildRuntimeFlowNodes(
       view,
-      options.mock,
       options.onNestedClick,
       options.onSourceOpen,
     ),
@@ -120,7 +118,6 @@ function buildDagreFallback(
         const dagreNode = graph.node(node.id);
         const flowNode = buildRuntimeFlowNode(
           node,
-          options.mock,
           options.onNestedClick,
           options.onSourceOpen,
         );
@@ -196,14 +193,13 @@ function targetHandleFor(
  *
  * 返回的 edgeRoutes 保存 ELK 计算出的 sections/bend points；React Flow
  * 的自定义正交 Edge 会直接使用这些点生成 SVG path，而不是重新走一遍
- * smoothstep。Mock 视图或已有手工 position 的视图保留旧布局。
+ * smoothstep。已有手工 position 的视图保留旧布局。
  */
 export async function layoutRuntimeView(
   view: ArchitectureView,
   options: RuntimeLayoutOptions,
 ): Promise<RuntimeLayoutResult> {
   if (
-    options.mock ||
     view.nodes.length === 0 ||
     view.nodes.some((node) => node.position)
   ) {
@@ -250,7 +246,6 @@ export async function layoutRuntimeView(
     const laidOut = laidOutById.get(node.id);
     const flowNode = buildRuntimeFlowNode(
       source ?? node,
-      options.mock,
       options.onNestedClick,
       options.onSourceOpen,
     );
