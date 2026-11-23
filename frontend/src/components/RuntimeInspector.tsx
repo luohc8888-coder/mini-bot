@@ -31,6 +31,8 @@ interface RuntimeInspectorProps {
   selected: boolean;
   onClearSelection: () => void;
   onSourceSelect: (source: ArchitectureSourceRef) => void;
+  onNestedClick?: (detailView: string) => void;
+  onLocateInStructure?: (symbolId: string) => void;
   activeSourceId?: string | null;
   analysis?: RuntimeAnalysisMeta | null;
 }
@@ -42,6 +44,8 @@ export function RuntimeInspector({
   selected,
   onClearSelection,
   onSourceSelect,
+  onNestedClick,
+  onLocateInStructure,
   activeSourceId,
   analysis,
 }: RuntimeInspectorProps) {
@@ -177,17 +181,34 @@ export function RuntimeInspector({
             <span className="section-tag section-tag--warm">视觉嵌套</span>
           </div>
           <div className="nested-reference-list">
-            {node.nested.map((nested) => (
-              <div className="nested-reference" key={nested.id}>
-                <span className="nested-reference__icon" aria-hidden="true">
-                  {KIND_ICONS[nested.kind]}
-                </span>
-                <div>
-                  <strong>{nested.label}</strong>
-                  <span>点击架构图中的嵌套卡片进入内部流程</span>
+            {node.nested.map((nested) =>
+              nested.detailView && onNestedClick ? (
+                <button
+                  type="button"
+                  className="nested-reference nested-reference--clickable"
+                  key={nested.id}
+                  onClick={() => onNestedClick(nested.detailView!)}
+                >
+                  <span className="nested-reference__icon" aria-hidden="true">
+                    {KIND_ICONS[nested.kind]}
+                  </span>
+                  <div>
+                    <strong>{nested.label}</strong>
+                    <span>点击进入内部执行流程 →</span>
+                  </div>
+                </button>
+              ) : (
+                <div className="nested-reference" key={nested.id}>
+                  <span className="nested-reference__icon" aria-hidden="true">
+                    {KIND_ICONS[nested.kind]}
+                  </span>
+                  <div>
+                    <strong>{nested.label}</strong>
+                    <span>嵌套子组件</span>
+                  </div>
                 </div>
-              </div>
-            ))}
+              ),
+            )}
           </div>
         </section>
       ) : null}
@@ -230,14 +251,26 @@ export function RuntimeInspector({
                         : ""}
                     </div>
                     {source.symbolId ? (
-                      <button
-                        type="button"
-                        className="source-ref__open"
-                        onClick={() => onSourceSelect(source)}
-                        title="打开全屏源码工作台"
-                      >
-                        查看核心源码
-                      </button>
+                      <div className="source-ref__actions">
+                        {onLocateInStructure ? (
+                          <button
+                            type="button"
+                            className="source-ref__locate"
+                            onClick={() => onLocateInStructure(source.symbolId!)}
+                            title="跳转到代码结构图查看该符号"
+                          >
+                            结构图
+                          </button>
+                        ) : null}
+                        <button
+                          type="button"
+                          className="source-ref__open"
+                          onClick={() => onSourceSelect(source)}
+                          title="打开源码工作台与 AI 对话"
+                        >
+                          查看源码
+                        </button>
+                      </div>
                     ) : null}
                   </div>
                   {source.symbolId ? (

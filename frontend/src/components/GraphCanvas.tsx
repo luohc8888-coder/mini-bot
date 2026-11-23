@@ -12,6 +12,7 @@ import {
   type NodeTypes,
 } from "@xyflow/react";
 import { ArchitectureNode } from "./ArchitectureNode";
+import { useTheme } from "../theme";
 import {
   layoutGraph,
   type ArchitectureFlowNode,
@@ -41,6 +42,8 @@ interface GraphCanvasProps {
   childrenByParent: Map<string | null, MockNode[]>;
   selectedId: string | null;
   onNodeClick: (nodeId: string) => void;
+  onNodeDoubleClick: (nodeId: string) => void;
+  onNodeAction: (nodeId: string) => void;
   onPaneClick: () => void;
 }
 
@@ -51,16 +54,19 @@ export function GraphCanvas({
   childrenByParent,
   selectedId,
   onNodeClick,
+  onNodeDoubleClick,
+  onNodeAction,
   onPaneClick,
 }: GraphCanvasProps) {
   const [flowNodes, setFlowNodes, onNodesChange] =
     useNodesState<ArchitectureFlowNode>([]);
   const [flowEdges, setFlowEdges, onEdgesChange] = useEdgesState<Edge>([]);
+  const [theme] = useTheme();
   const { fitView } = useReactFlow();
 
   // 只在层级变化时重新布局；拖拽位置在 React Flow 内部保持。
   useEffect(() => {
-    const layout = layoutGraph(nodes, edges, childrenByParent);
+    const layout = layoutGraph(nodes, edges, childrenByParent, onNodeAction);
     setFlowNodes(layout.nodes);
     setFlowEdges(layout.edges);
 
@@ -69,7 +75,7 @@ export function GraphCanvas({
     }, 40);
     return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [viewKey, childrenByParent, setFlowNodes, setFlowEdges, fitView]);
+  }, [viewKey, childrenByParent, onNodeAction, setFlowNodes, setFlowEdges, fitView]);
 
   useEffect(() => {
     setFlowNodes((current) =>
@@ -88,6 +94,7 @@ export function GraphCanvas({
       onEdgesChange={onEdgesChange}
       nodeTypes={nodeTypes}
       onNodeClick={(_, node) => onNodeClick(node.id)}
+      onNodeDoubleClick={(_, node) => onNodeDoubleClick(node.id)}
       onPaneClick={onPaneClick}
       fitView
       fitViewOptions={FIT_VIEW_OPTIONS}
@@ -103,7 +110,7 @@ export function GraphCanvas({
         variant={BackgroundVariant.Dots}
         gap={24}
         size={1.2}
-        color="#263653"
+        color={theme === "light" ? "#cbd6e6" : "#263653"}
       />
       <Controls position="top-right" showInteractive={false} />
       <MiniMap
@@ -114,10 +121,14 @@ export function GraphCanvas({
             (node.data as ArchitectureNodeData).kind as NodeKind
           ] ?? "#5b8cff"
         }
-        maskColor="rgba(4, 8, 16, 0.72)"
+        maskColor={
+          theme === "light"
+            ? "rgba(226, 236, 248, 0.72)"
+            : "rgba(4, 8, 16, 0.72)"
+        }
         style={{
-          background: "#0b1424",
-          border: "1px solid #24334c",
+          background: "var(--panel)",
+          border: "1px solid var(--border)",
           borderRadius: 10,
         }}
       />

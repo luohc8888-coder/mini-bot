@@ -1,3 +1,10 @@
+import { useEffect, useState } from "react";
+import {
+  architectureErrorMessage,
+  fetchSourceSnippet,
+} from "../architecture/api";
+import type { NodeRelationItem } from "../graph/data";
+import type { SourceSnippet } from "../types/architecture";
 import type { MockNode, MockProject, NodeKind, ViewStats } from "../types/graph";
 
 const KIND_LABELS: Record<NodeKind, string> = {
@@ -20,22 +27,14 @@ interface InspectorPanelProps {
   project: MockProject;
   stats: ViewStats;
   childSummary: string;
+  hasChildren: boolean;
+  incoming: NodeRelationItem[];
+  outgoing: NodeRelationItem[];
+  aiConfigured: boolean;
   onClearSelection: () => void;
-}
-
-function codePlaceholder(node: MockNode): string[] {
-  const source = node.filePath ?? node.path ?? "unknown";
-  const range =
-    node.startLine && node.endLine
-      ? `第 ${node.startLine}-${node.endLine} 行`
-      : "容器节点";
-  return [
-    `# ${source}`,
-    `# ${range}`,
-    "",
-    "# Phase 5 将在这里加载真实源码",
-    "# 并由 Monaco Editor 高亮对应符号范围。",
-  ];
+  onDrillDown: (nodeId: string) => void;
+  onOpenSource: (node: MockNode) => void;
+  onNavigateNode: (nodeId: string) => void;
 }
 
 function kindClass(node: MockNode | null): string {
@@ -48,19 +47,50 @@ export function InspectorPanel({
   project,
   stats,
   childSummary,
+  hasChildren,
+  incoming,
+  outgoing,
+  aiConfigured,
   onClearSelection,
+  onDrillDown,
+  onOpenSource,
+  onNavigateNode,
 }: InspectorPanelProps) {
-  const isLeaf = node?.kind === "function" || node?.kind === "method";
-  const lines = node
-    ? node.sourcePreview ?? codePlaceholder(node)
-    : codePlaceholder({
-        id: "project",
-        kind: "module",
-        label: project.name,
-        parentId: null,
-        path: project.root,
+  const canOpenSource = Boolean(node && !node.synthetic);
+  const symbolId = canOpenSource ? node?.id ?? null : null;
+  const [preview, setPreview] = useState<SourceSnippet | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!symbolId) {
+      setPreview(null);
+      setPreviewLoading(false);
+      setPreviewError(null);
+      return;
+    }
+    const controller = new AbortController();
+    setPreviewLoading(true);
+    setPreviewError(null);
+    void fetchSourceSnippet(symbolId, controller.signal, 36)
+      .then((snippet) => {
+        if (!controller.signal.aborted) {
+          setPreview(snippet);
+        }
+      })
+      .catch((error: unknown) => {
+        if (!controller.signal.aborted) {
+          setPreview(null);
+          setPreviewError(architectureErrorMessage(error));
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) {
+          setPreviewLoading(false);
+        }
       });
-  const startLine = node?.startLine ?? 1;
+    return () => controller.abort();
+  }, [symbolId]);
 
   return (
     <aside className="inspector">
@@ -88,26 +118,49 @@ export function InspectorPanel({
           <div className="inspector__badges">
             <span className={`kind-pill ${kindClass(node)}`}>
               <span aria-hidden="true">{KIND_ICONS[node.kind]}</span>
-              {KIND_LABELS[node.kind]}
+              {node.synthetic ? "包目录" : KIND_LABELS[node.kind]}
             </span>
             {selected ? <span className="soft-pill">已选中</span> : null}
           </div>
 
           <p className="inspector__summary">
-            {node.summary ?? "该节点暂无摘要。"}
+            {node.summary ?? "该符号暂无文档字符串。"}
           </p>
+
+          <div className="inspector__cta-row">
+            {hasChildren ? (
+              <button
+                type="button"
+                className="inspector__cta-btn"
+                onClick={() => onDrillDown(node.id)}
+              >
+                进入内部结构 →
+              </button>
+            ) : null}
+            {canOpenSource ? (
+              <button
+                type="button"
+                className="inspector__cta-btn inspector__cta-btn--primary"
+                onClick={() => onOpenSource(node)}
+              >
+                {aiConfigured ? "打开源码与 AI 对话" : "打开源码工作台"}
+              </button>
+            ) : null}
+          </div>
 
           <div className="meta-grid">
             <div className="meta-grid__item">
               <span>路径</span>
-              <strong>{node.filePath ?? node.path ?? "—"}</strong>
+              <strong title={node.filePath ?? node.path ?? ""}>
+                {node.filePath ?? node.path ?? "—"}
+              </strong>
             </div>
             <div className="meta-grid__item">
               <span>范围</span>
               <strong>
                 {node.startLine
                   ? `${node.startLine} – ${node.endLine ?? node.startLine} 行`
-                  : "容器节点"}
+                  : "目录容器"}
               </strong>
             </div>
             {node.signature ? (
@@ -128,7 +181,7 @@ export function InspectorPanel({
         <>
           <div className="inspector__badges">
             <span className="kind-pill kind-project">项目</span>
-            <span className="soft-pill">实时索引</span>
+            <span className="soft-pill">实时 AST 索引</span>
           </div>
           <p className="inspector__summary">{project.description}</p>
           <div className="project-stats">
@@ -152,67 +205,133 @@ export function InspectorPanel({
           <div className="empty-hint">
             <span className="empty-hint__icon">⌁</span>
             <div>
-              <strong>点击模块开始浏览</strong>
-              <p>沿项目 → 模块 → 类 → 方法逐层下钻；面包屑可随时返回。</p>
+              <strong>单击节点看详情，双击下钻或打开源码</strong>
+              <p>
+                沿项目 → 目录 → 模块 → 类 → 方法逐层探索；按 ⌘K / Ctrl+K
+                可全局搜索任意符号。
+              </p>
             </div>
           </div>
         </>
       )}
 
-      <section className="panel-section">
-        <div className="panel-section__title">
-          <span>源码定位</span>
-          <span className="section-tag">Phase 5</span>
-        </div>
-        {isLeaf ? (
-          <div className="code-block" aria-label="源码占位区域">
-            {lines.map((line, index) => (
-              <div className="code-line" key={`${index}-${line}`}>
-                <span className="code-line__number">{startLine + index}</span>
-                <code>{line}</code>
+      {node && (incoming.length > 0 || outgoing.length > 0) ? (
+        <section className="panel-section">
+          <div className="panel-section__title">
+            <span>关联调用与依赖</span>
+            <span className="section-tag">
+              入 {incoming.length} · 出 {outgoing.length}
+            </span>
+          </div>
+          {incoming.length > 0 ? (
+            <div className="relation-group">
+              <div className="relation-group__label">
+                被以下节点调用 / 引用 ({incoming.length})
               </div>
-            ))}
-          </div>
-        ) : (
-          <div className="panel-empty">
-            <span className="panel-empty__icon">⌘</span>
-            <p>容器节点不直接展示源码。请选择一个函数或方法。</p>
-          </div>
-        )}
-      </section>
+              <div className="relation-chip-list">
+                {incoming.slice(0, 12).map(({ node: related, edgeKind }) => (
+                  <button
+                    key={`in-${edgeKind}-${related.id}`}
+                    type="button"
+                    className="relation-chip"
+                    onClick={() => onNavigateNode(related.id)}
+                    title={related.qualifiedName ?? related.filePath ?? related.label}
+                  >
+                    <span className={`relation-chip__dot kind-${related.kind}`} />
+                    <span className="relation-chip__name">{related.label}</span>
+                    <span className="relation-chip__kind">
+                      {edgeKind === "calls" ? "调用" : "导入"}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
+          {outgoing.length > 0 ? (
+            <div className="relation-group">
+              <div className="relation-group__label">
+                调用 / 依赖以下节点 ({outgoing.length})
+              </div>
+              <div className="relation-chip-list">
+                {outgoing.slice(0, 12).map(({ node: related, edgeKind }) => (
+                  <button
+                    key={`out-${edgeKind}-${related.id}`}
+                    type="button"
+                    className="relation-chip"
+                    onClick={() => onNavigateNode(related.id)}
+                    title={related.qualifiedName ?? related.filePath ?? related.label}
+                  >
+                    <span className={`relation-chip__dot kind-${related.kind}`} />
+                    <span className="relation-chip__name">{related.label}</span>
+                    <span className="relation-chip__kind">
+                      {edgeKind === "calls" ? "调用" : "导入"}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
+        </section>
+      ) : null}
 
       <section className="panel-section">
         <div className="panel-section__title">
-          <span>AI 代码解释</span>
-          <span className="section-tag section-tag--warm">Phase 6</span>
+          <span>源码预览</span>
+          {canOpenSource ? (
+            <button
+              type="button"
+              className="source-ref__open"
+              onClick={() => node && onOpenSource(node)}
+            >
+              完整源码 / AI 对话
+            </button>
+          ) : (
+            <span className="section-tag">只读</span>
+          )}
         </div>
-        <div className="ai-reserved">
-          <div className="ai-reserved__intro">
-            <span className="ai-reserved__spark">✦</span>
-            <p>
-              选中代码后，AI 将基于所属方法、直接调用链和必要代码片段进行解释，
-              不会把整个项目发送给模型。
-            </p>
+        {canOpenSource ? (
+          previewLoading ? (
+            <div className="panel-empty">
+              <span className="source-drawer__spinner" aria-hidden="true" />
+              <p>正在读取 {node?.filePath ?? "源码"}…</p>
+            </div>
+          ) : previewError ? (
+            <div className="panel-empty">
+              <span className="panel-empty__icon">!</span>
+              <p>{previewError}</p>
+            </div>
+          ) : preview && preview.lines.length > 0 ? (
+            <div className="code-block" aria-label="源码片段预览">
+              {preview.lines.map((line) => (
+                <div className="code-line" key={line.number}>
+                  <span className="code-line__number">{line.number}</span>
+                  <code>{line.text || " "}</code>
+                </div>
+              ))}
+              {preview.truncated ? (
+                <div className="code-block__more">
+                  <button
+                    type="button"
+                    className="source-ref__open"
+                    onClick={() => node && onOpenSource(node)}
+                  >
+                    展开完整符号源码（共 {preview.symbolEndLine - preview.symbolStartLine + 1} 行）→
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          ) : (
+            <div className="panel-empty">
+              <span className="panel-empty__icon">⌘</span>
+              <p>该符号没有可预览的源码正文。</p>
+            </div>
+          )
+        ) : (
+          <div className="panel-empty">
+            <span className="panel-empty__icon">⌘</span>
+            <p>目录节点不直接对应单个文件。请双击进入并选择模块、类或函数。</p>
           </div>
-          <div className="prompt-chips" aria-hidden="true">
-            <span>解释作用</span>
-            <span>分析调用链</span>
-            <span>潜在问题</span>
-          </div>
-          <textarea
-            className="ai-reserved__input"
-            placeholder="补充问题，例如：这个方法为什么需要 ContextGovernor？"
-            disabled
-            rows={2}
-          />
-          <button type="button" className="primary-button" disabled>
-            接入 LLMProvider 后可提问
-          </button>
-          <p className="privacy-note">
-            <span aria-hidden="true">◇</span>
-            远端模型调用前会明确提示：源码数据可能离开本机。
-          </p>
-        </div>
+        )}
       </section>
 
       <div className="inspector__footer">

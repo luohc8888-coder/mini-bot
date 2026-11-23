@@ -39,10 +39,16 @@ export interface ChatReply {
   usage?: Record<string, unknown>;
 }
 
+export interface ChatHistoryItem {
+  role: "user" | "assistant";
+  content: string;
+}
+
 export interface ChatRequest {
   message: string;
   symbolId?: string;
   nodeLabel?: string;
+  history?: ChatHistoryItem[];
 }
 
 export class ArchitectureApiError extends Error {
@@ -119,11 +125,12 @@ export function fetchArchitectureGraph(
 export function fetchSourceSnippet(
   symbolId: string,
   signal?: AbortSignal,
+  limit = 10000,
 ): Promise<SourceSnippet> {
   const query = new URLSearchParams({
     symbol_id: symbolId,
     // 源码工作台展示完整符号范围，不再被默认的 400 行窗口截断。
-    limit: "10000",
+    limit: String(limit),
   });
   return requestJson<SourceSnippet>(`/api/source?${query.toString()}`, {
     signal,

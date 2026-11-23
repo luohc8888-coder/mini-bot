@@ -34,9 +34,21 @@ export function ArchitectureNode({
       <div className="arch-node__meta">{data.meta}</div>
       <div className="arch-node__footer">
         <span className="arch-node__summary">{data.childSummary}</span>
-        <span className="arch-node__action">
-          {data.hasChildren ? "下钻 →" : "查看源码"}
-        </span>
+        {data.hasChildren || !data.synthetic ? (
+          <button
+            type="button"
+            className="arch-node__action arch-node__action-btn"
+            onClick={(event) => {
+              event.stopPropagation();
+              data.onAction?.();
+            }}
+            title={data.hasChildren ? "进入下一层结构" : "打开源码工作台"}
+          >
+            {data.hasChildren ? "下钻 →" : "查看源码"}
+          </button>
+        ) : (
+          <span className="arch-node__action">目录</span>
+        )}
       </div>
       <Handle
         type="source"

@@ -98,3 +98,35 @@ def test_chat_rejects_empty_message(tmp_path: Path) -> None:
 
     assert response.status_code == 422
     assert provider.call_count == 0
+
+
+def test_chat_forwards_multi_turn_history(tmp_path: Path) -> None:
+    root, frontend = _project(tmp_path)
+    provider = MockProvider([LLMResponse(content="结合上一轮，这里会直接调用 print。")])
+    app = create_app(
+        root,
+        frontend_dir=frontend,
+        architecture_provider=provider,
+        architecture_cache=ArchitectureCache(tmp_path / "cache.json"),
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/chat",
+            json={
+                "message": "它具体调用了什么？",
+                "symbolId": _main_symbol_id(root),
+                "nodeLabel": "Main",
+                "history": [
+                    {"role": "user", "content": "这个函数做什么？"},
+                    {"role": "assistant", "content": "它是程序入口。"},
+                ],
+            },
+        )
+
+    assert response.status_code == 200
+    sent = provider.received_messages[0]
+    assert [msg["role"] for msg in sent] == ["system", "user", "assistant", "user"]
+    assert sent[1]["content"] == "这个函数做什么？"
+    assert sent[2]["content"] == "它是程序入口。"
+    assert sent[3]["content"] == "它具体调用了什么？"

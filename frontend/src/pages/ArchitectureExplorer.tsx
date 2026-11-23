@@ -32,7 +32,11 @@ import type { BreadcrumbItem } from "../types/graph";
 
 interface ArchitectureExplorerProps {
   workspaceRoot: string;
+  active: boolean;
   onViewChange: (viewMode: ExplorerViewMode) => void;
+  onOpenSearch?: () => void;
+  onLocateInStructure?: (symbolId: string) => void;
+  onAiConfiguredChange?: (configured: boolean) => void;
 }
 
 interface ViewStackItem {
@@ -104,7 +108,11 @@ const EMPTY_BREADCRUMBS: BreadcrumbItem[] = [
 
 export function ArchitectureExplorer({
   workspaceRoot,
+  active,
   onViewChange,
+  onOpenSearch,
+  onLocateInStructure,
+  onAiConfiguredChange,
 }: ArchitectureExplorerProps) {
   const [graph, setGraph] = useState<ArchitectureGraph | null>(null);
   const [status, setStatus] = useState<ArchitectureStatus | null>(null);
@@ -123,16 +131,6 @@ export function ArchitectureExplorer({
   const [staleCache, setStaleCache] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const startedRef = useRef(false);
-  const nodeClickTimerRef = useRef<number | null>(null);
-
-  const clearNodeClickTimer = useCallback(() => {
-    if (nodeClickTimerRef.current !== null) {
-      window.clearTimeout(nodeClickTimerRef.current);
-      nodeClickTimerRef.current = null;
-    }
-  }, []);
-
-  useEffect(() => clearNodeClickTimer, [clearNodeClickTimer]);
 
   const closeSource = useCallback(() => {
     setSourceGroup(null);
@@ -235,6 +233,7 @@ export function ArchitectureExplorer({
           return;
         }
         setStatus(nextStatus);
+        onAiConfiguredChange?.(Boolean(nextStatus.configured));
 
         const cacheStatus =
           nextStatus.cacheStatus ??
@@ -292,7 +291,6 @@ export function ArchitectureExplorer({
 
   const handleSourceSelect = useCallback(
     (source: ArchitectureSourceRef) => {
-      clearNodeClickTimer();
       if (!source.symbolId) {
         return;
       }
@@ -311,7 +309,7 @@ export function ArchitectureExplorer({
       }
       openSourceGroup([source], sourceDisplayLabel(source), source);
     },
-    [currentView, graph, openSourceGroup, clearNodeClickTimer],
+    [currentView, graph, openSourceGroup],
   );
 
   const openView = (view: ArchitectureView, label: string) => {
@@ -333,24 +331,7 @@ export function ArchitectureExplorer({
     if (!node) {
       return;
     }
-    clearNodeClickTimer();
     setSelectedId(node.id);
-    const sourceRefs = (node.sourceRefs ?? []).filter(
-      (source) => source.symbolId,
-    );
-    if (sourceRefs.length > 0) {
-      // 有下钻视图的节点仍保留双击下钻；单击稍等片刻再进入源码，
-      // 避免双击时第一下就被源码工作台拦截。
-      if (node.detailView) {
-        nodeClickTimerRef.current = window.setTimeout(() => {
-          nodeClickTimerRef.current = null;
-          openSourceGroup(sourceRefs, node.label, sourceRefs[0]);
-        }, 260);
-      } else {
-        openSourceGroup(sourceRefs, node.label, sourceRefs[0]);
-      }
-      return;
-    }
     if (
       relationMode === "main" &&
       currentView.edges.some(
@@ -364,7 +345,6 @@ export function ArchitectureExplorer({
   };
 
   const handleNodeDoubleClick = (nodeId: string) => {
-    clearNodeClickTimer();
     if (!graph || !currentView) {
       return;
     }
@@ -393,7 +373,6 @@ export function ArchitectureExplorer({
   );
 
   const handleBreadcrumb = (viewId: string | null) => {
-    clearNodeClickTimer();
     closeSource();
     if (!viewId) {
       return;
@@ -407,7 +386,6 @@ export function ArchitectureExplorer({
   };
 
   const handleBack = () => {
-    clearNodeClickTimer();
     if (sourceRef || sourceGroup) {
       closeSource();
       return;
@@ -434,18 +412,19 @@ export function ArchitectureExplorer({
   const subtitle = graph
     ? graph.mock
       ? "AI 驱动的项目架构理解工作台 · Mock"
-      : "AI 驱动的项目架构理解工作台 · Phase 4.3"
+      : "AI 驱动的项目架构理解工作台"
     : analyzing
       ? "AI 正在读取结构化索引并生成运行架构…"
-      : "AI 驱动的项目架构理解工作台 · Phase 4.3";
+      : "AI 驱动的项目架构理解工作台";
 
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell${active ? "" : " view-pane--hidden"}`}>
       <AppHeader
         workspaceRoot={workspaceRoot}
         viewMode="architecture"
         onViewChange={onViewChange}
+        onOpenSearch={onOpenSearch}
         subtitle={subtitle}
         architectureMode={badgeMode}
       />
@@ -638,7 +617,6 @@ export function ArchitectureExplorer({
                     onNestedClick={handleNestedClick}
                     onSourceOpen={handleSourceSelect}
                     onPaneClick={() => {
-                      clearNodeClickTimer();
                       setSelectedId(null);
                       closeSource();
                     }}
@@ -654,6 +632,7 @@ export function ArchitectureExplorer({
                     activeSymbolId={sourceRef.symbolId ?? null}
                     title={sourceGroup.label}
                     onSelectSource={setSourceRef}
+                    onLocateInStructure={onLocateInStructure}
                     onClose={closeSource}
                   />
                 ) : null}
@@ -713,7 +692,6 @@ export function ArchitectureExplorer({
 
         {sourceRef && sourceGroup ? (
           <SourceChatPanel
-            key={sourceRef.symbolId ?? sourceRef.filePath ?? "source-chat"}
             source={sourceRef}
             nodeLabel={sourceGroup.label}
             configured={Boolean(status?.configured)}
@@ -726,6 +704,8 @@ export function ArchitectureExplorer({
             selected={selectedId !== null}
             onClearSelection={() => setSelectedId(null)}
             onSourceSelect={handleSourceSelect}
+            onNestedClick={handleNestedClick}
+            onLocateInStructure={onLocateInStructure}
             activeSourceId={null}
             analysis={
               graph.mock

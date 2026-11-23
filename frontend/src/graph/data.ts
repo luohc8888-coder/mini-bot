@@ -309,6 +309,47 @@ export function getChildSummary(index: GraphIndex, node: MockNode): string {
   return summarizeChildren(node, getChildren(index, node.id));
 }
 
+export interface NodeRelationItem {
+  node: MockNode;
+  edgeKind: MockEdge["kind"];
+}
+
+export function getNodeRelations(
+  index: GraphIndex,
+  nodeId: string | null,
+): { incoming: NodeRelationItem[]; outgoing: NodeRelationItem[] } {
+  if (!nodeId) {
+    return { incoming: [], outgoing: [] };
+  }
+  const incoming: NodeRelationItem[] = [];
+  const outgoing: NodeRelationItem[] = [];
+  const seenIncoming = new Set<string>();
+  const seenOutgoing = new Set<string>();
+
+  for (const edge of index.data.edges) {
+    if (edge.kind === "contains") {
+      continue;
+    }
+    if (edge.target === nodeId && edge.source !== nodeId) {
+      const sourceNode = index.nodeById.get(edge.source);
+      const key = `${edge.kind}:${edge.source}`;
+      if (sourceNode && !seenIncoming.has(key)) {
+        seenIncoming.add(key);
+        incoming.push({ node: sourceNode, edgeKind: edge.kind });
+      }
+    }
+    if (edge.source === nodeId && edge.target !== nodeId) {
+      const targetNode = index.nodeById.get(edge.target);
+      const key = `${edge.kind}:${edge.target}`;
+      if (targetNode && !seenOutgoing.has(key)) {
+        seenOutgoing.add(key);
+        outgoing.push({ node: targetNode, edgeKind: edge.kind });
+      }
+    }
+  }
+  return { incoming, outgoing };
+}
+
 export function buildViewModel(
   index: GraphIndex,
   containerId: string | null,

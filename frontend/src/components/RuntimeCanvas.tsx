@@ -12,6 +12,7 @@ import {
 } from "@xyflow/react";
 import { RuntimeArchitectureNode } from "./RuntimeArchitectureNode";
 import { RuntimeOrthogonalEdge } from "./RuntimeOrthogonalEdge";
+import { useTheme } from "../theme";
 import { layoutRuntimeView } from "../architecture/elkLayout";
 import {
   buildRuntimeFlowEdge,
@@ -76,6 +77,7 @@ export function RuntimeCanvas({
   const [edgeRoutes, setEdgeRoutes] = useState<Record<string, RuntimeEdgeRoute>>(
     {},
   );
+  const [theme] = useTheme();
   const { fitView } = useReactFlow();
   const feedbackEdgeIds = useMemo(
     () => detectFeedbackEdgeIds(view.edges),
@@ -167,7 +169,7 @@ export function RuntimeCanvas({
         variant={BackgroundVariant.Dots}
         gap={24}
         size={1.2}
-        color="#263653"
+        color={theme === "light" ? "#cbd6e6" : "#263653"}
       />
       <Controls position="top-right" showInteractive={false} />
       <MiniMap
@@ -176,10 +178,14 @@ export function RuntimeCanvas({
         nodeColor={(node) =>
           MINIMAP_COLORS[(node.data as RuntimeNodeData).kind] ?? "#6f9cff"
         }
-        maskColor="rgba(4, 8, 16, 0.72)"
+        maskColor={
+          theme === "light"
+            ? "rgba(226, 236, 248, 0.72)"
+            : "rgba(4, 8, 16, 0.72)"
+        }
         style={{
-          background: "#0b1424",
-          border: "1px solid #24334c",
+          background: "var(--panel)",
+          border: "1px solid var(--border)",
           borderRadius: 10,
         }}
       />

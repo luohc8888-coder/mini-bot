@@ -13,6 +13,7 @@ interface SourceWorkspaceProps {
   activeSymbolId: string | null;
   title?: string;
   onSelectSource: (source: ArchitectureSourceRef) => void;
+  onLocateInStructure?: (symbolId: string) => void;
   onClose: () => void;
 }
 
@@ -39,6 +40,7 @@ export function SourceWorkspace({
   activeSymbolId,
   title: titleOverride,
   onSelectSource,
+  onLocateInStructure,
   onClose,
 }: SourceWorkspaceProps) {
   const usableSources = useMemo(
@@ -93,9 +95,20 @@ export function SourceWorkspace({
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        onClose();
+      if (event.key !== "Escape" || event.isComposing) {
+        return;
       }
+      const target = event.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.tagName === "SELECT" ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+      onClose();
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => {
@@ -165,6 +178,16 @@ export function SourceWorkspace({
           </div>
         </div>
         <div className="source-drawer__actions">
+          {symbolId && onLocateInStructure ? (
+            <button
+              type="button"
+              className="source-drawer__button"
+              onClick={() => onLocateInStructure(symbolId)}
+              title="在代码结构图中定位该符号"
+            >
+              在结构图定位
+            </button>
+          ) : null}
           {filePath ? (
             <button
               type="button"
@@ -177,18 +200,10 @@ export function SourceWorkspace({
           ) : null}
           <button
             type="button"
-            className="source-drawer__button source-workspace__back"
-            onClick={onClose}
-            title="返回上一层架构视图"
-          >
-            ← 返回架构
-          </button>
-          <button
-            type="button"
             className="source-drawer__close"
             onClick={onClose}
             aria-label="关闭源码工作台"
-            title="关闭源码工作台"
+            title="关闭源码工作台 (Esc)"
           >
             ×
           </button>

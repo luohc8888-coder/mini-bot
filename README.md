@@ -125,7 +125,7 @@ mini-bot web --workspace /path/to/project --port 8765
 - `GET /api/architecture`：读取当前源码指纹对应的 ArchitectureGraph；`?allow_stale=true` 可显式读取旧缓存
 - `POST /api/architecture/analyze?force=false`：调用 LLM 生成并校验运行架构
 
-正式运行时不需要单独启动 Vite；FastAPI 的 `/` 提供构建后的 React 前端。只有修改前端源码时才需要：
+正式运行时不需要单独启动 Vite；FastAPI 的 `/` 提供构建后的 React 前端。页面右上角的「日光模式 / 夜间模式」按钮可切换明暗主题，选择会保存在浏览器本地。只有修改前端源码时才需要：
 
 ```bash
 cd frontend

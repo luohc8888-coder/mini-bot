@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -43,6 +44,14 @@ _DEFAULT_SOURCE_LINES = 400
 _MAX_SOURCE_LINES = 10_000
 _MAX_SOURCE_BYTES = 512 * 1024
 _MAX_CHAT_SOURCE_CHARS = 30_000
+_MAX_CHAT_HISTORY_MESSAGES = 12
+
+
+class ChatHistoryItem(BaseModel):
+    """源码对话的历史消息项（只允许 user / assistant）。"""
+
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=8000)
 
 
 class ChatRequest(BaseModel):
@@ -55,6 +64,7 @@ class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
     symbol_id: str | None = Field(default=None, alias="symbolId")
     node_label: str | None = Field(default=None, max_length=200, alias="nodeLabel")
+    history: list[ChatHistoryItem] = Field(default_factory=list, max_length=20)
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -493,11 +503,17 @@ def create_app(
         message = request.message.strip()
         if not message:
             raise HTTPException(status_code=422, detail="消息不能为空。")
+        history_messages = [
+            {"role": item.role, "content": item.content.strip()}
+            for item in request.history[-_MAX_CHAT_HISTORY_MESSAGES:]
+            if item.content.strip()
+        ]
         messages = [
             {
                 "role": "system",
                 "content": _chat_system_prompt(source_payload, request.node_label),
             },
+            *history_messages,
             {"role": "user", "content": message},
         ]
         try:

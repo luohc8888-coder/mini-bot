@@ -1,11 +1,18 @@
 import type { ExplorerViewMode } from "../types/architecture";
+import { useTheme } from "../theme";
 
-export type ArchitectureBadgeMode = "live" | "mock" | "loading" | "ready" | "unconfigured";
+export type ArchitectureBadgeMode =
+  | "live"
+  | "mock"
+  | "loading"
+  | "ready"
+  | "unconfigured";
 
 interface AppHeaderProps {
   workspaceRoot: string;
   viewMode: ExplorerViewMode;
   onViewChange: (viewMode: ExplorerViewMode) => void;
+  onOpenSearch?: () => void;
   subtitle?: string;
   architectureMode?: ArchitectureBadgeMode;
 }
@@ -21,14 +28,24 @@ const ARCHITECTURE_BADGES: Record<
   unconfigured: { label: "NO LLM", className: "mock-badge" },
 };
 
+function workspaceShortName(workspaceRoot: string): string {
+  const trimmed = workspaceRoot.replace(/[\\/]+$/, "");
+  const parts = trimmed.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] ?? workspaceRoot;
+}
+
 export function AppHeader({
   workspaceRoot,
   viewMode,
   onViewChange,
+  onOpenSearch,
   subtitle,
   architectureMode = "mock",
 }: AppHeaderProps) {
   const architectureBadge = ARCHITECTURE_BADGES[architectureMode];
+  const [theme, setTheme] = useTheme();
+  const shortWorkspace = workspaceShortName(workspaceRoot);
+
   return (
     <header className="app-header">
       <div className="brand">
@@ -42,17 +59,29 @@ export function AppHeader({
           <div className="brand__subtitle">
             {subtitle ??
               (viewMode === "architecture"
-                ? "AI 驱动的项目架构理解工作台 · Phase 4.3"
-                : "本地代码理解工作台 · Phase 4 Live")}
+                ? "AI 驱动的项目架构理解工作台"
+                : "本地 AST 代码结构探索工作台")}
           </div>
         </div>
       </div>
 
       <div className="header-meta">
-        <span className="workspace-chip">
+        <span className="workspace-chip" title={workspaceRoot}>
           <span className="status-dot" />
-          {workspaceRoot}
+          <span className="workspace-chip__text">{shortWorkspace}</span>
         </span>
+        {onOpenSearch ? (
+          <button
+            type="button"
+            className="search-trigger"
+            onClick={onOpenSearch}
+            title="全局搜索代码符号 (⌘K / Ctrl+K)"
+          >
+            <span aria-hidden="true">⌕</span>
+            <span>搜索符号</span>
+            <kbd>⌘K</kbd>
+          </button>
+        ) : null}
         <div className="view-switch" role="group" aria-label="视图切换">
           <button
             type="button"
@@ -82,6 +111,21 @@ export function AppHeader({
         ) : (
           <span className="live-badge">LIVE API</span>
         )}
+        <button
+          type="button"
+          className="theme-toggle"
+          onClick={() =>
+            setTheme((current) => (current === "dark" ? "light" : "dark"))
+          }
+          aria-label={theme === "dark" ? "切换到日光模式" : "切换到夜间模式"}
+          aria-pressed={theme === "light"}
+          title={theme === "dark" ? "切换到日光模式" : "切换到夜间模式"}
+        >
+          <span className="theme-toggle__icon" aria-hidden="true">
+            {theme === "dark" ? "☀" : "☾"}
+          </span>
+          <span>{theme === "dark" ? "日光模式" : "夜间模式"}</span>
+        </button>
         <span className="version-chip">V3.0</span>
       </div>
     </header>

@@ -11,6 +11,8 @@ export interface ArchitectureNodeData extends Record<string, unknown> {
   summary: string;
   childSummary: string;
   hasChildren: boolean;
+  synthetic?: boolean;
+  onAction?: () => void;
 }
 
 export type ArchitectureFlowNode = Node<ArchitectureNodeData, "architecture">;
@@ -43,6 +45,7 @@ function nodeMeta(node: MockNode): string {
 function buildFlowNode(
   node: MockNode,
   childrenByParent: Map<string | null, MockNode[]>,
+  onNodeAction?: (nodeId: string) => void,
 ): ArchitectureFlowNode {
   const size = NODE_SIZES[node.kind];
   const children = childrenByParent.get(node.id) ?? [];
@@ -58,6 +61,8 @@ function buildFlowNode(
       summary: node.summary ?? "",
       childSummary: summarizeChildren(node, children),
       hasChildren: children.length > 0,
+      synthetic: node.synthetic,
+      onAction: onNodeAction ? () => onNodeAction(node.id) : undefined,
     },
     style: {
       width: size.width,
@@ -124,6 +129,7 @@ export function layoutGraph(
   mockNodes: MockNode[],
   mockEdges: MockEdge[],
   childrenByParent: Map<string | null, MockNode[]> = new Map(),
+  onNodeAction?: (nodeId: string) => void,
 ): LayoutResult {
   if (mockNodes.length === 0) {
     return { nodes: [], edges: [] };
@@ -136,7 +142,7 @@ export function layoutGraph(
     const cellWidth = 290;
     const cellHeight = 150;
     const nodes = mockNodes.map((mockNode, index) => {
-      const flowNode = buildFlowNode(mockNode, childrenByParent);
+      const flowNode = buildFlowNode(mockNode, childrenByParent, onNodeAction);
       return {
         ...flowNode,
         position: {
@@ -180,7 +186,7 @@ export function layoutGraph(
   dagre.layout(graph);
 
   const nodes = mockNodes.map((mockNode) => {
-    const flowNode = buildFlowNode(mockNode, childrenByParent);
+    const flowNode = buildFlowNode(mockNode, childrenByParent, onNodeAction);
     const layoutNode = graph.node(mockNode.id);
     const size = NODE_SIZES[mockNode.kind];
     return {
