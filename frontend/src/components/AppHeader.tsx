@@ -12,6 +12,8 @@ interface AppHeaderProps {
   viewMode: ExplorerViewMode;
   onViewChange: (viewMode: ExplorerViewMode) => void;
   onOpenSearch?: () => void;
+  onOpenGit?: () => void;
+  gitChangeCount?: number | null;
   subtitle?: string;
   architectureMode?: ArchitectureBadgeMode;
 }
@@ -37,6 +39,8 @@ export function AppHeader({
   viewMode,
   onViewChange,
   onOpenSearch,
+  onOpenGit,
+  gitChangeCount = null,
   subtitle,
   architectureMode = "ready",
 }: AppHeaderProps) {
@@ -78,6 +82,20 @@ export function AppHeader({
             <span aria-hidden="true">⌕</span>
             <span>搜索符号</span>
             <kbd>⌘K</kbd>
+          </button>
+        ) : null}
+        {onOpenGit ? (
+          <button
+            type="button"
+            className="git-trigger"
+            onClick={onOpenGit}
+            title="查看当前 Workspace 的只读 Git 变更与 Diff"
+          >
+            <span aria-hidden="true">⎇</span>
+            <span>Git 变更</span>
+            {gitChangeCount !== null && gitChangeCount > 0 ? (
+              <span className="git-trigger__count">{gitChangeCount}</span>
+            ) : null}
           </button>
         ) : null}
         <div className="view-switch" role="group" aria-label="视图切换">

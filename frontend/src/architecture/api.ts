@@ -1,6 +1,8 @@
 import type {
   ArchitectureGraph,
   ArchitectureSourceRef,
+  GitDiffResponse,
+  GitStatusResponse,
   SourceSnippet,
 } from "../types/architecture";
 
@@ -127,12 +129,16 @@ export function fetchSourceSnippet(
   symbolId: string,
   signal?: AbortSignal,
   limit = 10000,
+  fullFile = false,
 ): Promise<SourceSnippet> {
   const query = new URLSearchParams({
     symbol_id: symbolId,
-    // 源码工作台展示完整符号范围，不再被默认的 400 行窗口截断。
+    // 源码工作台展示完整符号范围或完整文件，不再被默认的 400 行窗口截断。
     limit: String(limit),
   });
+  if (fullFile) {
+    query.set("full_file", "true");
+  }
   return requestJson<SourceSnippet>(`/api/source?${query.toString()}`, {
     signal,
   });
@@ -314,6 +320,22 @@ export function resolveSymbolByPath(
     `/api/symbol-by-path?${query.toString()}`,
     { signal },
   );
+}
+
+export function fetchGitStatus(
+  signal?: AbortSignal,
+): Promise<GitStatusResponse> {
+  return requestJson<GitStatusResponse>("/api/git/status", { signal });
+}
+
+export function fetchGitDiff(
+  filePath: string,
+  signal?: AbortSignal,
+): Promise<GitDiffResponse> {
+  const query = new URLSearchParams({ file: filePath });
+  return requestJson<GitDiffResponse>(`/api/git/diff?${query.toString()}`, {
+    signal,
+  });
 }
 
 export async function generateArchitecture(

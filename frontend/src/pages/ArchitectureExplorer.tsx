@@ -39,6 +39,8 @@ interface ArchitectureExplorerProps {
   active: boolean;
   onViewChange: (viewMode: ExplorerViewMode) => void;
   onOpenSearch?: () => void;
+  onOpenGit?: () => void;
+  gitChangeCount?: number | null;
   onLocateInStructure?: (symbolId: string) => void;
   onAiConfiguredChange?: (configured: boolean) => void;
 }
@@ -115,6 +117,8 @@ export function ArchitectureExplorer({
   active,
   onViewChange,
   onOpenSearch,
+  onOpenGit,
+  gitChangeCount,
   onLocateInStructure,
   onAiConfiguredChange,
 }: ArchitectureExplorerProps) {
@@ -474,6 +478,8 @@ export function ArchitectureExplorer({
         viewMode="architecture"
         onViewChange={onViewChange}
         onOpenSearch={onOpenSearch}
+        onOpenGit={onOpenGit}
+        gitChangeCount={gitChangeCount}
         subtitle={subtitle}
         architectureMode={badgeMode}
       />
@@ -726,6 +732,7 @@ export function ArchitectureExplorer({
                 status={status}
                 error={error}
                 onGenerate={() => void runGeneration(false)}
+                onOpenStructure={() => onViewChange("structure")}
                 onUseStale={
                   status?.cacheStatus === "stale"
                     ? () => void loadStaleCache()
@@ -807,6 +814,7 @@ interface ArchitectureEmptyStateProps {
   status: ArchitectureStatus | null;
   error: string | null;
   onGenerate: () => void;
+  onOpenStructure: () => void;
   onUseStale?: () => void;
 }
 
@@ -816,11 +824,12 @@ function ArchitectureEmptyState({
   status,
   error,
   onGenerate,
+  onOpenStructure,
   onUseStale,
 }: ArchitectureEmptyStateProps) {
   const busy = loading || analyzing;
   const canGenerate = Boolean(status?.configured) && !busy;
-  const stale = status?.cacheStatus === "stale";
+  const stale = !busy && status?.cacheStatus === "stale";
   const canUseStale = Boolean(onUseStale) && !busy;
   return (
     <div className="architecture-empty">
@@ -833,8 +842,8 @@ function ArchitectureEmptyState({
           : loading
             ? "正在加载运行架构"
             : stale
-              ? "架构缓存已过期"
-              : "还没有生成运行架构"}
+              ? "源码已更新，运行架构缓存待刷新"
+              : "运行架构按需生成（可选 LLM 功能）"}
       </h3>
       <p>
         {analyzing
@@ -842,10 +851,10 @@ function ArchitectureEmptyState({
           : loading
             ? "正在检查本地缓存与 Provider 状态。"
             : stale
-              ? "检测到项目源码发生变化，上次生成的架构缓存已失效。可以继续查看旧缓存，或重新分析项目。"
+              ? "检测到项目源码发生变化，上次生成的架构缓存已过期。你可以先看代码结构、继续查看旧缓存，或调用 LLM 重新生成。"
               : status?.configured
-                ? "点击下方按钮，让 LLM 基于 AST/CodeGraph 生成可交互的语义架构图。"
-                : "运行架构需要先在 mini-bot 中配置 LLM Provider。代码结构浏览不依赖 LLM。"}
+                ? "代码结构视图无需 LLM 可直接使用；点击下方按钮即可调用 LLM 生成可交互的语义运行架构图。"
+                : "运行架构需要先在 mini-bot 中配置 LLM Provider；你随时可以直接使用不依赖 LLM 的代码结构视图。"}
       </p>
       {stale && status?.cacheGeneratedAt ? (
         <div className="architecture-empty__hint">
@@ -868,6 +877,13 @@ function ArchitectureEmptyState({
           <button
             type="button"
             className="ghost-button architecture-empty__action"
+            onClick={onOpenStructure}
+          >
+            先看代码结构
+          </button>
+          <button
+            type="button"
+            className="ghost-button architecture-empty__action"
             onClick={onUseStale}
             disabled={!canUseStale}
           >
@@ -879,18 +895,27 @@ function ArchitectureEmptyState({
             onClick={onGenerate}
             disabled={!canGenerate}
           >
-            重新分析
+            重新生成（调用 LLM）
           </button>
         </div>
       ) : (
-        <button
-          type="button"
-          className="primary-button architecture-empty__action"
-          onClick={onGenerate}
-          disabled={!canGenerate}
-        >
-          生成运行架构
-        </button>
+        <div className="architecture-empty__actions">
+          <button
+            type="button"
+            className="ghost-button architecture-empty__action"
+            onClick={onOpenStructure}
+          >
+            查看代码结构
+          </button>
+          <button
+            type="button"
+            className="primary-button architecture-empty__action"
+            onClick={onGenerate}
+            disabled={!canGenerate}
+          >
+            生成运行架构（需 LLM）
+          </button>
+        </div>
       )}
     </div>
   );

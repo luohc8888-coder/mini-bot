@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ReactFlowProvider } from "@xyflow/react";
 import { AppHeader } from "../components/AppHeader";
 import { Breadcrumb } from "../components/Breadcrumb";
+import { GitDiffModal } from "../components/GitDiffModal";
 import { GraphCanvas } from "../components/GraphCanvas";
 import { InspectorPanel } from "../components/InspectorPanel";
 import { QuickSearchModal } from "../components/QuickSearchModal";
@@ -11,7 +12,11 @@ import {
   type SourceHighlightRange,
 } from "../components/SourceWorkspace";
 import { ArchitectureExplorer } from "./ArchitectureExplorer";
-import { resolveSymbolByPath } from "../architecture/api";
+import {
+  fetchArchitectureStatus,
+  fetchGitStatus,
+  resolveSymbolByPath,
+} from "../architecture/api";
 import { fetchExplorerData } from "../graph/api";
 import {
   buildGraphData,
@@ -68,9 +73,65 @@ export function ExplorerPage() {
   >([]);
   const [structureHighlight, setStructureHighlight] =
     useState<SourceHighlightRange | null>(null);
-  const [viewMode, setViewMode] = useState<ExplorerViewMode>("architecture");
+  const [viewMode, setViewMode] = useState<ExplorerViewMode>("structure");
+  const [mountedViews, setMountedViews] = useState<{
+    structure: boolean;
+    architecture: boolean;
+  }>({
+    structure: true,
+    architecture: false,
+  });
+  const [pendingNav, setPendingNav] = useState<{
+    nodeId: string;
+    openSource: boolean;
+  } | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
-  const [aiConfigured, setAiConfigured] = useState(false);
+  const [gitOpen, setGitOpen] = useState(false);
+  const [gitChangeCount, setGitChangeCount] = useState<number | null>(null);
+  const [aiConfigured, setAiConfigured] = useState<boolean | null>(null);
+
+  const switchViewMode = useCallback((nextMode: ExplorerViewMode) => {
+    setViewMode(nextMode);
+    setMountedViews((prev) =>
+      prev[nextMode] ? prev : { ...prev, [nextMode]: true },
+    );
+  }, []);
+
+  // 仅当用户在代码结构视图打开源码对话且尚未获取 LLM 配置状态时，按需检查一次。
+  useEffect(() => {
+    if (!structureSource || aiConfigured !== null) {
+      return;
+    }
+    let cancelled = false;
+    void fetchArchitectureStatus()
+      .then((res) => {
+        if (!cancelled) {
+          setAiConfigured(Boolean(res.configured));
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setAiConfigured(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [structureSource, aiConfigured]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void fetchGitStatus(controller.signal)
+      .then((res) => {
+        if (!controller.signal.aborted && res.available) {
+          setGitChangeCount(res.summary.total);
+        }
+      })
+      .catch(() => {
+        // 非 Git 仓库或接口不可用时静默降级
+      });
+    return () => controller.abort();
+  }, []);
 
   useEffect(() => {
     applyTheme(getInitialTheme());
@@ -88,6 +149,9 @@ export function ExplorerPage() {
   }, []);
 
   useEffect(() => {
+    if (!mountedViews.structure) {
+      return;
+    }
     let cancelled = false;
     setLoading(true);
     setError(null);
@@ -111,7 +175,7 @@ export function ExplorerPage() {
     return () => {
       cancelled = true;
     };
-  }, [reloadKey]);
+  }, [reloadKey, mountedViews.structure]);
 
   const index = useMemo<GraphIndex | null>(
     () => (data ? buildGraphIndex(data) : null),
@@ -226,14 +290,15 @@ export function ExplorerPage() {
 
   const handleNavigateToNode = useCallback(
     (nodeId: string, openSource = false) => {
+      switchViewMode("structure");
       if (!index) {
+        setPendingNav({ nodeId, openSource });
         return;
       }
       const target = getNode(index, nodeId);
       if (!target) {
         return;
       }
-      setViewMode("structure");
       setContainerId(target.parentId ?? null);
       setSelectedId(target.id);
       if (openSource && !target.synthetic) {
@@ -247,8 +312,17 @@ export function ExplorerPage() {
         setStructureHighlight(null);
       }
     },
-    [index],
+    [index, switchViewMode],
   );
+
+  useEffect(() => {
+    if (!pendingNav || !index) {
+      return;
+    }
+    const { nodeId, openSource } = pendingNav;
+    setPendingNav(null);
+    handleNavigateToNode(nodeId, openSource);
+  }, [pendingNav, index, handleNavigateToNode]);
 
   const handleLocateFromArchitecture = useCallback(
     (symbolId: string) => {
@@ -312,24 +386,31 @@ export function ExplorerPage() {
 
   return (
     <>
-      <ArchitectureExplorer
-        workspaceRoot={data?.project.root ?? "当前 Workspace"}
-        active={viewMode === "architecture"}
-        onViewChange={setViewMode}
-        onOpenSearch={() => setSearchOpen(true)}
-        onLocateInStructure={handleLocateFromArchitecture}
-        onAiConfiguredChange={setAiConfigured}
-      />
-
-      <div
-        className={`app-shell${isStructureActive ? "" : " view-pane--hidden"}`}
-      >
-        <AppHeader
-          workspaceRoot={project?.root ?? "正在连接本地服务..."}
-          viewMode="structure"
-          onViewChange={setViewMode}
+      {mountedViews.architecture ? (
+        <ArchitectureExplorer
+          workspaceRoot={data?.project.root ?? "当前 Workspace"}
+          active={viewMode === "architecture"}
+          onViewChange={switchViewMode}
           onOpenSearch={() => setSearchOpen(true)}
+          onOpenGit={() => setGitOpen(true)}
+          gitChangeCount={gitChangeCount}
+          onLocateInStructure={handleLocateFromArchitecture}
+          onAiConfiguredChange={setAiConfigured}
         />
+      ) : null}
+
+      {mountedViews.structure ? (
+        <div
+          className={`app-shell${isStructureActive ? "" : " view-pane--hidden"}`}
+        >
+          <AppHeader
+            workspaceRoot={project?.root ?? "正在连接本地服务..."}
+            viewMode="structure"
+            onViewChange={switchViewMode}
+            onOpenSearch={() => setSearchOpen(true)}
+            onOpenGit={() => setGitOpen(true)}
+            gitChangeCount={gitChangeCount}
+          />
 
         {!data || !index || !view || !project || !stats ? (
           <main className="state-screen">
@@ -506,7 +587,7 @@ export function ExplorerPage() {
                 <SourceChatPanel
                   source={structureSource}
                   nodeLabel={structureSource.symbolName}
-                  configured={aiConfigured}
+                  configured={Boolean(aiConfigured)}
                   onJumpToLine={handleStructureJumpToLine}
                   onJumpToFileLine={handleStructureJumpToFileLine}
                 />
@@ -520,7 +601,7 @@ export function ExplorerPage() {
                   hasChildren={inspectorHasChildren}
                   incoming={inspectorRelations.incoming}
                   outgoing={inspectorRelations.outgoing}
-                  aiConfigured={aiConfigured}
+                  aiConfigured={Boolean(aiConfigured)}
                   onClearSelection={() => setSelectedId(null)}
                   onDrillDown={handleDrillDown}
                   onOpenSource={openNodeSource}
@@ -547,13 +628,25 @@ export function ExplorerPage() {
             </footer>
           </>
         )}
-      </div>
+        </div>
+      ) : null}
 
       <QuickSearchModal
         open={searchOpen}
         nodes={data?.nodes ?? []}
         onClose={() => setSearchOpen(false)}
         onSelectSymbol={handleSearchSelect}
+      />
+
+      <GitDiffModal
+        open={gitOpen}
+        onClose={() => setGitOpen(false)}
+        onStatusLoaded={(res) => {
+          setGitChangeCount(res.available ? res.summary.total : null);
+        }}
+        onOpenSymbol={(symbolId, openSource) => {
+          handleNavigateToNode(symbolId, openSource);
+        }}
       />
     </>
   );

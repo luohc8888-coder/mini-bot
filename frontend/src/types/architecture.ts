@@ -37,6 +37,7 @@ export interface SourceSnippet {
   startLine: number;
   endLine: number;
   totalLines: number;
+  fullFile?: boolean;
   truncated: boolean;
   lines: SourceSnippetLine[];
 }
@@ -102,3 +103,67 @@ export interface ArchitectureGraph {
 }
 
 export type ExplorerViewMode = "architecture" | "structure";
+
+export interface GitHeadInfo {
+  hash: string;
+  subject: string;
+  relativeTime: string;
+}
+
+export interface GitChangedFile {
+  path: string;
+  status: string;
+  category: "modified" | "added" | "deleted" | "renamed" | "untracked";
+  staged: boolean;
+  unstaged: boolean;
+  symbolId: string | null;
+  symbolName: string | null;
+  symbolCount: number;
+}
+
+export interface GitStatusSummary {
+  total: number;
+  modified: number;
+  added: number;
+  deleted: number;
+  renamed: number;
+  untracked: number;
+}
+
+export interface GitStatusResponse {
+  available: boolean;
+  reason: string | null;
+  branch: string | null;
+  head: GitHeadInfo | null;
+  files: GitChangedFile[];
+  truncated: boolean;
+  summary: GitStatusSummary;
+}
+
+export interface GitDiffLine {
+  kind: "meta" | "hunk" | "add" | "del" | "context";
+  oldLine: number | null;
+  newLine: number | null;
+  text: string;
+}
+
+export interface GitFileSymbol {
+  symbolId: string;
+  name: string;
+  kind: string;
+  qualifiedName: string;
+  startLine: number;
+  endLine: number;
+}
+
+export interface GitDiffResponse {
+  filePath: string;
+  status: string;
+  category: string;
+  additions: number;
+  deletions: number;
+  isBinary: boolean;
+  truncated: boolean;
+  lines: GitDiffLine[];
+  symbols: GitFileSymbol[];
+}

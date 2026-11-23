@@ -128,9 +128,10 @@ export function QuickSearchModal({
                 );
               } else if (event.key === "Enter" && results[clampedIndex]) {
                 event.preventDefault();
+                // Enter 默认直接打开源码；Shift/Cmd/Ctrl + Enter 在代码结构图中定位
                 onSelectSymbol(
                   results[clampedIndex],
-                  event.shiftKey || event.metaKey || event.ctrlKey,
+                  !(event.shiftKey || event.metaKey || event.ctrlKey),
                 );
               }
             }}
@@ -149,14 +150,13 @@ export function QuickSearchModal({
             results.map((node, index) => {
               const active = index === clampedIndex;
               return (
-                <button
+                <div
                   key={node.id}
-                  type="button"
                   role="option"
                   aria-selected={active}
                   className={`quick-search-modal__item${active ? " is-active" : ""}`}
                   onMouseEnter={() => setActiveIndex(index)}
-                  onClick={() => onSelectSymbol(node, false)}
+                  onClick={() => onSelectSymbol(node, true)}
                 >
                   <span className={`quick-search-modal__kind kind-${node.kind}`}>
                     {KIND_LABELS[node.kind]}
@@ -168,16 +168,39 @@ export function QuickSearchModal({
                       {node.startLine ? `:${node.startLine}` : ""}
                     </span>
                   </span>
-                  <span className="quick-search-modal__hint">定位</span>
-                </button>
+                  <span className="quick-search-modal__actions">
+                    <button
+                      type="button"
+                      className="quick-search-modal__action"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onSelectSymbol(node, false);
+                      }}
+                      title="在代码结构图中定位该符号"
+                    >
+                      定位
+                    </button>
+                    <button
+                      type="button"
+                      className="quick-search-modal__action quick-search-modal__action--primary"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onSelectSymbol(node, true);
+                      }}
+                      title="打开源码工作台与 AI 对话"
+                    >
+                      打开源码
+                    </button>
+                  </span>
+                </div>
               );
             })
           )}
         </div>
 
         <footer className="quick-search-modal__footer">
-          <span>↑↓ 选择 · Enter 在代码结构中定位</span>
-          <span>Shift + Enter 直接打开源码</span>
+          <span>↑↓ 选择 · 点击行或 Enter 打开源码</span>
+          <span>Shift + Enter 在代码结构中定位</span>
         </footer>
       </div>
     </div>

@@ -7,6 +7,7 @@ import type {
   ArchitectureSourceRef,
   SourceSnippet,
 } from "../types/architecture";
+import { tokenizeCodeLine } from "../utils/syntaxHighlight";
 
 export interface SourceHighlightRange {
   start: number;
@@ -62,9 +63,15 @@ export function SourceWorkspace({
     null;
   const symbolId = activeSource?.symbolId;
   const [snippet, setSnippet] = useState<SourceSnippet | null>(null);
+  const [fullFile, setFullFile] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+
+  // 切换符号时默认回到符号视图，保持聚焦阅读体验
+  useEffect(() => {
+    setFullFile(false);
+  }, [symbolId]);
 
   useEffect(() => {
     if (!symbolId) {
@@ -74,12 +81,11 @@ export function SourceWorkspace({
       return;
     }
     const controller = new AbortController();
-    setSnippet(null);
     setLoading(true);
     setError(null);
     setCopied(false);
 
-    void fetchSourceSnippet(symbolId, controller.signal)
+    void fetchSourceSnippet(symbolId, controller.signal, 10000, fullFile)
       .then((nextSnippet) => {
         if (!controller.signal.aborted) {
           setSnippet(nextSnippet);
@@ -100,7 +106,7 @@ export function SourceWorkspace({
     return () => {
       controller.abort();
     };
-  }, [symbolId]);
+  }, [symbolId, fullFile]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -126,14 +132,39 @@ export function SourceWorkspace({
   }, [onClose]);
 
   useEffect(() => {
-    if (!highlightRange || !snippet || !codeContainerRef.current) {
+    if (!snippet || !codeContainerRef.current) {
+      return;
+    }
+    const targetLine = highlightRange
+      ? highlightRange.start
+      : snippet.fullFile
+        ? snippet.symbolStartLine
+        : null;
+    if (!targetLine) {
       return;
     }
     const targetEl = codeContainerRef.current.querySelector<HTMLElement>(
-      `[data-line-number="${highlightRange.start}"]`,
+      `[data-line-number="${targetLine}"]`,
     );
     targetEl?.scrollIntoView({ behavior: "smooth", block: "center" });
   }, [highlightRange, snippet]);
+
+  const highlightedLines = useMemo(() => {
+    if (!snippet) {
+      return [];
+    }
+    return snippet.lines.map((line) => ({
+      number: line.number,
+      tokens: tokenizeCodeLine(line.text, snippet.language, snippet.filePath),
+    }));
+  }, [snippet]);
+
+  const canExpandFullFile = Boolean(
+    snippet &&
+      (fullFile ||
+        snippet.symbolStartLine > 1 ||
+        snippet.symbolEndLine < snippet.totalLines),
+  );
 
   const title =
     titleOverride ??
@@ -197,6 +228,23 @@ export function SourceWorkspace({
           </div>
         </div>
         <div className="source-drawer__actions">
+          {canExpandFullFile ? (
+            <button
+              type="button"
+              className={`source-drawer__button${
+                fullFile ? " source-drawer__button--active" : ""
+              }`}
+              onClick={() => setFullFile((prev) => !prev)}
+              aria-pressed={fullFile}
+              title={
+                fullFile
+                  ? "切换回仅展示当前符号范围"
+                  : "展开所在完整文件（含顶部 import 与上下文），高亮当前符号区间"
+              }
+            >
+              {fullFile ? "仅看符号" : "展开完整文件"}
+            </button>
+          ) : null}
           {symbolId && onLocateInStructure ? (
             <button
               type="button"
@@ -302,11 +350,16 @@ export function SourceWorkspace({
           ref={codeContainerRef}
           className="source-drawer__code source-workspace__code"
         >
-          {snippet.lines.map((line) => {
+          {highlightedLines.map((line) => {
             const isHighlighted = Boolean(
               highlightRange &&
                 line.number >= highlightRange.start &&
                 line.number <= highlightRange.end,
+            );
+            const isInSymbol = Boolean(
+              snippet.fullFile &&
+                line.number >= snippet.symbolStartLine &&
+                line.number <= snippet.symbolEndLine,
             );
             return (
               <div
@@ -316,10 +369,22 @@ export function SourceWorkspace({
                   line.number === snippet.symbolStartLine
                     ? " source-drawer__line--symbol-start"
                     : ""
-                }${isHighlighted ? " source-drawer__line--highlighted" : ""}`}
+                }${isInSymbol ? " source-drawer__line--in-symbol" : ""}${
+                  isHighlighted ? " source-drawer__line--highlighted" : ""
+                }`}
               >
                 <span className="source-drawer__line-number">{line.number}</span>
-                <code>{line.text || " "}</code>
+                <code>
+                  {line.tokens.map((tok, idx) =>
+                    tok.kind === "plain" ? (
+                      tok.text
+                    ) : (
+                      <span key={idx} className={`tok-${tok.kind}`}>
+                        {tok.text}
+                      </span>
+                    ),
+                  )}
+                </code>
               </div>
             );
           })}

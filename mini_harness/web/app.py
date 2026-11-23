@@ -52,6 +52,8 @@ from mini_harness.workspace import (
     WorkspaceResolver,
 )
 
+from .git_service import GitServiceError, get_git_diff, get_git_status
+
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 
@@ -190,6 +192,7 @@ def _source_payload(
     symbol_id: str,
     *,
     max_lines: int = _DEFAULT_SOURCE_LINES,
+    full_file: bool = False,
 ) -> dict[str, object]:
     """按符号 ID 读取 Workspace 内的只读源码片段。
 
@@ -247,6 +250,17 @@ def _source_payload(
         end_line = 0
         returned_lines: list[dict[str, object]] = []
         truncated = False
+    elif full_file:
+        start_line = 1
+        end_line = min(total_lines, max_lines)
+        truncated = end_line < total_lines
+        returned_lines = [
+            {
+                "number": line_number,
+                "text": file_lines[line_number - 1],
+            }
+            for line_number in range(start_line, end_line + 1)
+        ]
     else:
         start_line = symbol_start
         end_line = min(symbol_end, start_line + max_lines - 1)
@@ -273,6 +287,7 @@ def _source_payload(
         "startLine": start_line,
         "endLine": end_line,
         "totalLines": total_lines,
+        "fullFile": full_file,
         "truncated": truncated,
         "lines": returned_lines,
     }
@@ -599,6 +614,10 @@ def create_app(
             le=_MAX_SOURCE_LINES,
             description="返回的最大源码行数；源码工作台请求完整符号窗口",
         ),
+        full_file: bool = Query(
+            default=False,
+            description="是否展开该符号所在的完整文件上下文（仍仅接受已索引 symbol_id）",
+        ),
     ) -> dict[str, object]:
         """按符号 ID 返回只读源码片段，用于运行架构的源码追溯。"""
         return _source_payload(
@@ -606,7 +625,23 @@ def create_app(
             graph,
             symbol_id,
             max_lines=limit,
+            full_file=full_file,
         )
+
+    @app.get("/api/git/status")
+    def git_status() -> dict[str, object]:
+        """返回当前 Workspace 的只读 Git 分支与变更文件状态。"""
+        return get_git_status(resolved, graph)
+
+    @app.get("/api/git/diff")
+    def git_diff(
+        file: str = Query(..., min_length=1, description="Workspace 内相对文件路径"),
+    ) -> dict[str, object]:
+        """返回指定变更文件的只读 Git Unified Diff 与关联符号。"""
+        try:
+            return get_git_diff(resolved, graph, file)
+        except GitServiceError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
     @app.post("/api/chat")
     async def chat_source(request: ChatRequest) -> dict[str, object]:
